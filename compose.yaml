@@ -1,0 +1,171 @@
+services:
+  api:
+    container_name: api-telm
+    build:
+      context: ./api
+      dockerfile: Dockerfile.dev
+    networks:
+      - telm-network
+    restart: unless-stopped
+    environment:
+      - HTTP_PORT=${HTTP_PORT}
+      - GRPC_PORT=${GRPC_PORT}
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - SSL_MODE=${SSL_MODE}
+    ports:
+      - "${GRPC_PORT}:${GRPC_PORT}"
+    volumes:
+      - ./api:/api
+    depends_on:
+      database:
+        condition: service_healthy
+
+  web:
+    container_name: web-telm
+    image: oven/bun:1
+    working_dir: /app
+    networks:
+      - telm-network
+    volumes:
+      - ./web:/app
+      - ./web/node_modules:/app/node_modules
+    command: sh -c "bun install && bun run dev"
+
+  proxy:
+    container_name: proxy-telm
+    build:
+      context: ./proxy
+      dockerfile: Dockerfile.dev
+      args:
+        - HTTP_PORT=${HTTP_PORT}
+    ports:
+      - "${APP_PORT}:80"
+    environment:
+      - HTTP_PORT=${HTTP_PORT}
+    networks:
+      - telm-network
+    depends_on:
+      - api
+      - web
+
+  otelcollector:
+    container_name: otelcollector-telm
+    image: otel/opentelemetry-collector-contrib:0.120.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./config/otelcollector-config.yaml:/etc/otelcol/config.yaml:ro
+      - pg-logs:/var/log/postgresql:ro   # reads postgres logs (read-only)
+    ports:
+      - "4317:4317"   # OTLP gRPC  ← apps/gen send telemetry here
+      - "4318:4318"   # OTLP HTTP  ← apps/gen send telemetry here
+    networks:
+      - telm-network
+    depends_on:
+      - api
+
+  gen:
+    container_name: gen-telm
+    image: golang:1.26.0
+    working_dir: /api
+    command: go run -mod=mod ./cmd/gen
+    environment:
+      - OTLP_ENDPOINT=${GEN_OTLP_ENDPOINT:-otelcollector-telm:4318}
+      - SERVICE_NAME=${GEN_SERVICE_NAME:-api-gateway}
+      - WORKERS=${GEN_WORKERS:-5}
+      - SLEEP_MS=${GEN_SLEEP_MS:-0}
+    volumes:
+      - ./api:/api
+      - go-build-cache:/root/.cache/go-build
+      - go-mod-cache:/go/pkg/mod
+    networks:
+      - telm-network
+    depends_on:
+      - otelcollector
+    profiles: ["gen"]
+
+  database:
+    container_name: database-telm
+    build:
+      context: ./database
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # Enable pgaudit and write JSON-formatted logs to a shared volume
+    command: >
+      postgres
+      -c shared_preload_libraries=pgaudit
+      -c pgaudit.log=ddl,write,role
+      -c pgaudit.log_parameter=on
+      -c log_destination=jsonlog
+      -c logging_collector=on
+      -c log_directory=/var/log/postgresql
+      -c log_filename=postgresql.json
+      -c log_rotation_age=1d
+      -c log_min_messages=warning
+      -c log_file_mode=0644
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    volumes:
+      - telm-data:/var/lib/postgresql/data
+      - pg-logs:/var/log/postgresql   # shared with otelcollector
+    networks:
+      - telm-network
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pgaudit-test:
+    container_name: pgaudit-test-telm
+    build:
+      context: ./api
+      dockerfile: Dockerfile.dev
+    command: go run -mod=mod ./cmd/pgaudit-test
+    environment:
+      - OTLP_ENDPOINT=otelcollector-telm:4318
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - SSL_MODE=${SSL_MODE}
+      - HTTP_PORT=9001
+    ports:
+      - "9001:9001"
+    volumes:
+      - ./api:/api
+      - go-build-cache:/root/.cache/go-build
+      - go-mod-cache:/go/pkg/mod
+    networks:
+      - telm-network
+    depends_on:
+      database:
+        condition: service_healthy
+    profiles: ["pgaudit-test"]
+
+  pgweb:
+    image: sosedoff/pgweb
+    container_name: pgweb-telm
+    environment:
+      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?sslmode=${SSL_MODE}
+    depends_on:
+      - database
+    restart: unless-stopped
+    networks:
+      - telm-network
+
+volumes:
+  telm-data:
+  go-build-cache:
+  go-mod-cache:
+  pg-logs:
+
+networks:
+  telm-network:
+    driver: bridge
