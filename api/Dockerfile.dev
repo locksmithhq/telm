@@ -1,0 +1,7 @@
+FROM golang:1.26.0
+
+WORKDIR /api
+
+RUN go install github.com/air-verse/air@latest
+
+CMD air
