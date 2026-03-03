@@ -1,0 +1,28 @@
+{
+  "name": "telm-web",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@fontsource/roboto": "^5.2.7",
+    "@mdi/font": "^7.4.47",
+    "axios": "^1.7.9",
+    "echarts": "^5.5.0",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0",
+    "vuetify": "^3.7.15"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "sass-embedded": "^1.83.4",
+    "unplugin-fonts": "^1.4.0",
+    "unplugin-vue-components": "^0.27.5",
+    "vite": "^6.0.11",
+    "vite-plugin-vuetify": "^2.0.4"
+  }
+}

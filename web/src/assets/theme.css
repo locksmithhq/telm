@@ -1,0 +1,65 @@
+/* ── Telm design tokens — dark (default) ───────────────────────────────────── */
+.v-theme--dark {
+  /* text */
+  --telm-text-1:   #e2e8f0;
+  --telm-text-2:   #94a3b8;
+  --telm-text-3:   #64748b;
+  --telm-text-4:   #475569;
+
+  /* surfaces / backgrounds */
+  --telm-bg-header:  rgba(255,255,255,.025);
+  --telm-bg-row:     rgba(255,255,255,.018);
+  --telm-bg-row-alt: rgba(255,255,255,.032);
+  --telm-bg-hover:   rgba(99,102,241,.065);
+  --telm-bg-detail:  rgba(0,0,0,.20);
+  --telm-bg-code:    rgba(255,255,255,.03);
+  --telm-bg-attr:    rgba(255,255,255,.02);
+
+  /* borders */
+  --telm-border:       rgba(255,255,255,.07);
+  --telm-border-light: rgba(255,255,255,.04);
+
+  /* charts */
+  --telm-chart-axis:         #94a3b8;
+  --telm-chart-axis-dim:     #64748b;
+  --telm-chart-grid:         #141e30;
+  --telm-chart-tooltip-bg:   #1a2235;
+  --telm-chart-tooltip-bdr:  #2d3f5c;
+  --telm-chart-tooltip-text: #cbd5e1;
+
+  /* misc */
+  --telm-sev-label-opacity: .85;
+}
+
+/* ── Telm design tokens — light ─────────────────────────────────────────────── */
+.v-theme--light {
+  /* text */
+  --telm-text-1:   #0f172a;
+  --telm-text-2:   #334155;
+  --telm-text-3:   #64748b;
+  --telm-text-4:   #94a3b8;
+
+  /* surfaces / backgrounds */
+  --telm-bg-header:  rgba(0,0,0,.025);
+  --telm-bg-row:     rgba(0,0,0,.012);
+  --telm-bg-row-alt: rgba(0,0,0,.022);
+  --telm-bg-hover:   rgba(99,102,241,.07);
+  --telm-bg-detail:  rgba(0,0,0,.04);
+  --telm-bg-code:    rgba(0,0,0,.03);
+  --telm-bg-attr:    rgba(0,0,0,.02);
+
+  /* borders */
+  --telm-border:       rgba(0,0,0,.09);
+  --telm-border-light: rgba(0,0,0,.05);
+
+  /* charts */
+  --telm-chart-axis:         #64748b;
+  --telm-chart-axis-dim:     #94a3b8;
+  --telm-chart-grid:         #e8edf5;
+  --telm-chart-tooltip-bg:   #ffffff;
+  --telm-chart-tooltip-bdr:  #cbd5e1;
+  --telm-chart-tooltip-text: #0f172a;
+
+  /* misc */
+  --telm-sev-label-opacity: 1;
+}
