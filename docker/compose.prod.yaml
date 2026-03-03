@@ -1,0 +1,76 @@
+services:
+
+  api:
+    container_name: telm
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      - HTTP_PORT=8080
+      - GRPC_PORT=9317
+      - POSTGRES_HOST=database
+      - POSTGRES_USER=${POSTGRES_USER:-telm}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-telm123}
+      - POSTGRES_DB=${POSTGRES_DB:-telm}
+      - POSTGRES_PORT=5432
+      - SSL_MODE=disable
+    ports:
+      - "${APP_PORT:-4000}:8080"   # Web UI + REST API
+    depends_on:
+      database:
+        condition: service_healthy
+    networks:
+      - telm-net
+
+  otelcollector:
+    container_name: telm-collector
+    image: otel/opentelemetry-collector-contrib:0.120.0
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ../config/otelcollector-config.prod.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC  ← apps enviam traces/metrics/logs aqui
+      - "4318:4318"   # OTLP HTTP  ← alternativa HTTP para SDK
+    depends_on:
+      - api
+    networks:
+      - telm-net
+
+  database:
+    container_name: telm-db
+    build:
+      context: ../database
+    restart: unless-stopped
+    command: >
+      postgres
+      -c shared_preload_libraries=pgaudit
+      -c pgaudit.log=ddl,write,role
+      -c log_destination=jsonlog
+      -c logging_collector=on
+      -c log_directory=/var/log/postgresql
+      -c log_filename=postgresql.json
+      -c log_rotation_age=1d
+      -c log_min_messages=warning
+      -c log_file_mode=0644
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-telm}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-telm123}
+      - POSTGRES_DB=${POSTGRES_DB:-telm}
+    volumes:
+      - telm-data:/var/lib/postgresql/data
+    networks:
+      - telm-net
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-telm}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  telm-data:
+
+networks:
+  telm-net:
+    driver: bridge
