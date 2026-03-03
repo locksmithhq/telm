@@ -1,0 +1,9 @@
+FROM nginx:1.29.0-alpine
+
+COPY nginx.conf /etc/nginx/nginx.conf
+
+ARG HTTP_PORT
+
+RUN sed -i -e 's/$HTTP_PORT/'"$HTTP_PORT"'/g' /etc/nginx/nginx.conf
+
+CMD ["nginx", "-g", "daemon off;"]
