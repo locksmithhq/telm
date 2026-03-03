@@ -1,0 +1,87 @@
+receivers:
+  # ── OTLP receiver (apps / gen) ───────────────────────────────────────────────
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # ── pgaudit log receiver ─────────────────────────────────────────────────────
+  # Reads the PostgreSQL JSON log file written by the logging collector.
+  # Only AUDIT lines are kept; traceparent SQL comments are extracted so that
+  # each audit log entry links back to the originating HTTP trace in telm.
+  filelog/pgaudit:
+    include: [ /var/log/postgresql/postgresql.json ]
+    start_at: end
+    operators:
+      # 1. Drop lines that are not pgaudit audit records (startup msgs, etc.)
+      - type: filter
+        expr: 'not (body matches "AUDIT:")'
+
+      # 2. Parse the JSON log line; keys land in attributes.*
+      - type: json_parser
+        on_error: send
+        timestamp:
+          parse_from: attributes.timestamp
+          layout: "%Y-%m-%d %H:%M:%S.%f UTC"
+
+      # 3. Promote the message to body so the log is readable in telm
+      - type: move
+        from: attributes.message
+        to: body
+        on_error: send
+
+      # 4. Extract structured pgaudit fields from the body
+      #    AUDIT: SESSION,stmt,sub,CLASS,COMMAND,obj_type,obj_name,statement,...
+      - type: regex_parser
+        parse_from: body
+        regex: 'AUDIT:\s+(?P<audit_type>[^,]+),\d+,\d+,(?P<audit_class>[^,]+),(?P<audit_command>[^,]+),[^,]*,(?P<object_name>[^,]*),(?P<statement>.+?)(?:,<[^>]+>)?$'
+        on_error: send
+
+      # 5. Try to extract W3C traceparent from the SQL comment injected by the Go API
+      #    /*traceparent='00-<trace_id>-<span_id>-01'*/ SELECT ...
+      #    on_error: send means: keep the log even when the comment is absent
+      - type: regex_parser
+        parse_from: attributes.statement
+        regex: "traceparent='00-(?P<trace_id>[a-f0-9]{32})-(?P<span_id>[a-f0-9]{16})-"
+        on_error: send
+
+      # 6. Tag log source as postgres-audit for telm service filter
+      - type: add
+        field: resource["service.name"]
+        value: postgres-audit
+      - type: add
+        field: resource["db.system"]
+        value: postgresql
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+
+exporters:
+  otlp/telm:
+    endpoint: api-telm:9317
+    tls:
+      insecure: true
+
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/telm]
+
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/telm]
+
+    logs:
+      receivers: [otlp, filelog/pgaudit]   # pgaudit entra aqui
+      processors: [batch]
+      exporters: [otlp/telm]
