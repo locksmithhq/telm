@@ -211,6 +211,62 @@ function rangeParams(range) {
   return { from: from.toISOString(), to: to.toISOString() };
 }
 
+// Retorna a duração do bucket em segundos para cada range (espelha a lógica do backend)
+function bucketSeconds(range) {
+  if (range === "7d") return 3600;   // hour
+  if (range === "24h") return 1800;  // 30 min
+  if (range === "6h") return 300;    // 5 min
+  return 60;                          // 1 min
+}
+
+function buildSeriesConfig(type, vals, pointCount, isRate = false) {
+  // sum / histogram → bar chart (contagens e distribuições por bucket)
+  if (type === "sum" || type === "histogram") {
+    const color = type === "sum" ? "#3b82f6" : "#f97316";
+    return {
+      type: "bar",
+      data: vals,
+      itemStyle: { color, borderRadius: [2, 2, 0, 0] },
+      barMaxWidth: 20,
+      tooltip: isRate ? { valueFormatter: (v) => v + " /s" } : {},
+    };
+  }
+
+  // summary → line sem área (série de quantis/estatísticas)
+  if (type === "summary") {
+    return {
+      type: "line",
+      data: vals,
+      smooth: 0.3,
+      lineStyle: { color: "#14b8a6", width: 1.5 },
+      itemStyle: { color: "#14b8a6" },
+      showSymbol: pointCount <= 30,
+      symbolSize: 3,
+    };
+  }
+
+  // gauge (e fallback) → line com área
+  return {
+    type: "line",
+    data: vals,
+    smooth: 0.4,
+    lineStyle: { color: "#10b981", width: 1.5 },
+    itemStyle: { color: "#10b981" },
+    showSymbol: pointCount <= 30,
+    symbolSize: 3,
+    areaStyle: {
+      color: {
+        type: "linear",
+        x: 0, y: 0, x2: 0, y2: 1,
+        colorStops: [
+          { offset: 0, color: "rgba(16,185,129,.2)" },
+          { offset: 1, color: "rgba(16,185,129,.01)" },
+        ],
+      },
+    },
+  };
+}
+
 async function renderChart(m, range) {
   const key = metricKey(m);
   loadingChart.value = { ...loadingChart.value, [key]: true };
@@ -242,10 +298,17 @@ async function renderChart(m, range) {
         minute: "2-digit",
       });
     });
-    const vals = pts.map((p) =>
-      p.avg_value != null ? +p.avg_value.toFixed(4) : p.total_count || 0,
-    );
+    // sum → taxa por segundo (total_sum / bucket_duration)
+    const bktSec = bucketSeconds(range);
+    const isRate = m.type === "sum";
+    const vals = pts.map((p) => {
+      if (isRate && p.total_sum != null)
+        return +((p.total_sum / bktSec).toFixed(4));
+      if (p.avg_value != null) return +p.avg_value.toFixed(4);
+      return p.total_count || 0;
+    });
     const c = ct();
+    const seriesConfig = buildSeriesConfig(m.type, vals, pts.length, isRate);
     chart.setOption({
       backgroundColor: "transparent",
       grid: { top: 4, right: 4, bottom: 20, left: 4, containLabel: true },
@@ -259,6 +322,8 @@ async function renderChart(m, range) {
       },
       yAxis: {
         type: "value",
+        name: isRate ? "/s" : "",
+        nameTextStyle: { color: c.axisDim, fontSize: 9 },
         axisLine: { show: false },
         axisTick: { show: false },
         axisLabel: { color: c.axisDim, fontSize: 9 },
@@ -270,30 +335,7 @@ async function renderChart(m, range) {
         borderColor: c.tooltipBdr,
         textStyle: { color: c.tooltipText, fontSize: 11 },
       },
-      series: [
-        {
-          type: "line",
-          data: vals,
-          smooth: 0.4,
-          lineStyle: { color: "#10b981", width: 1.5 },
-          itemStyle: { color: "#10b981" },
-          showSymbol: pts.length <= 30,
-          symbolSize: 3,
-          areaStyle: {
-            color: {
-              type: "linear",
-              x: 0,
-              y: 0,
-              x2: 0,
-              y2: 1,
-              colorStops: [
-                { offset: 0, color: "rgba(16,185,129,.2)" },
-                { offset: 1, color: "rgba(16,185,129,.01)" },
-              ],
-            },
-          },
-        },
-      ],
+      series: [seriesConfig],
     });
     chartInstances[key] = chart;
   } catch {
