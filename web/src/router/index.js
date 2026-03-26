@@ -22,6 +22,14 @@ const routes = [
     path: '/logs',
     component: () => import('@/module/logs/LogsView.vue'),
   },
+  {
+    path: '/dashboards',
+    component: () => import('@/module/dashboards/DashboardsView.vue'),
+  },
+  {
+    path: '/dashboards/:id',
+    component: () => import('@/module/dashboards/DashboardView.vue'),
+  },
 ]
 
 export default createRouter({

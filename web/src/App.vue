@@ -46,6 +46,13 @@
           >
             <v-icon size="13" start>mdi-text-box-outline</v-icon>Logs
           </v-tab>
+          <v-tab
+            value="dashboards"
+            min-width="0"
+            class="px-3 text-caption font-weight-medium"
+          >
+            <v-icon size="13" start>mdi-monitor-dashboard</v-icon>Dashboards
+          </v-tab>
         </v-tabs>
       </div>
 
@@ -132,6 +139,7 @@ const tabRouteMap = {
   traces: "/traces",
   metrics: "/metrics",
   logs: "/logs",
+  dashboards: "/dashboards",
 };
 const routeTabMap = Object.fromEntries(
   Object.entries(tabRouteMap).map(([k, v]) => [v, k]),
