@@ -1,5 +1,5 @@
 <template>
-  <v-dialog v-model="open" fullscreen transition="dialog-bottom-transition" persistent>
+  <v-dialog v-model="open" fullscreen transition="dialog-bottom-transition" persistent class="editor-dialog">
     <div class="editor-root">
 
       <!-- Top bar -->
@@ -11,9 +11,6 @@
           hide-details variant="plain" density="compact"
           style="max-width: 300px; font-size: 13px"
         />
-        <v-divider vertical class="mx-3" style="height:20px" />
-        <span class="text-caption text-disabled mr-1">Width:</span>
-        <button v-for="s in sizes" :key="s.v" class="sz-btn mono" :class="{ active: size === s.v }" @click="size = s.v">{{ s.l }}</button>
         <v-spacer />
         <v-btn size="small" variant="text" @click="cancel">Cancel</v-btn>
         <v-btn size="small" color="primary" variant="flat" class="ml-1" :disabled="!generatedQuery" @click="apply">Apply</v-btn>
@@ -21,7 +18,7 @@
 
       <div class="editor-body">
 
-        <!-- ── Left sidebar ── -->
+        <!-- ── Left sidebar (scrollable) ── -->
         <div class="editor-sidebar">
 
           <!-- STEP 1 — Data source -->
@@ -48,7 +45,7 @@
 
             <!-- metrics.series: full catalog browser -->
             <template v-if="source === 'metrics.series'">
-              <div class="d-flex gap-1 mb-2">
+              <div class="d-flex gap-1 mb-1">
                 <v-text-field
                   v-model="metricSearch"
                   placeholder="Search metrics…"
@@ -59,92 +56,140 @@
                 />
                 <v-select
                   v-model="metricTypeFilter"
-                  :items="['gauge','sum','histogram','summary']"
+                  :items="metricTypes"
                   placeholder="Type"
                   hide-details density="compact" variant="outlined"
-                  clearable
-                  style="max-width:100px;font-size:11px"
+                  style="width: 80px; font-size:11px"
                 />
               </div>
+              <v-select
+                v-model="filters.service"
+                :items="serviceOptions"
+                placeholder="All services"
+                hide-details density="compact" variant="outlined"
+                clearable
+                class="mb-2"
+                style="font-size:11px"
+              />
               <div class="metric-list">
                 <div
-                  v-for="m in filteredCatalog" :key="m.name + m.service"
+                  v-for="m in filteredCatalog" :key="m.name + '::' + m.service"
                   class="metric-item" :class="{ active: filters.name === m.name && filters.service === m.service }"
                   @click="selectMetric(m)"
                 >
-                  <span class="type-badge mono" :style="`color:${typeBadgeColor(m.type)};background:${typeBadgeColor(m.type)}18`">
-                    {{ typeIcon(m.type) }} {{ m.type }}
-                  </span>
-                  <div class="overflow-hidden flex-grow-1 mx-1">
-                    <div class="mono text-truncate" style="font-size:10px;font-weight:500">{{ m.name }}</div>
-                    <div class="text-caption text-disabled" style="font-size:9px">{{ m.service }}<span v-if="m.unit"> · {{ m.unit }}</span></div>
+                  <span class="type-badge" :style="`background:${typeColor(m.type)}22;color:${typeColor(m.type)}`">{{ m.type.slice(0,3).toUpperCase() }}</span>
+                  <div class="d-flex flex-column overflow-hidden">
+                    <span class="text-truncate" style="font-size:11px">{{ m.name }}</span>
+                    <span class="text-truncate mono" style="font-size:9px;opacity:.55">{{ m.service }}</span>
                   </div>
-                  <v-icon v-if="filters.name === m.name && filters.service === m.service" size="12" color="primary">mdi-check</v-icon>
                 </div>
-                <div v-if="!filteredCatalog.length" class="text-caption text-disabled pa-2 text-center">No metrics found</div>
               </div>
             </template>
 
-            <!-- All sources: service + range -->
-            <div class="filter-row">
-              <label class="filter-label">Service</label>
-              <v-select
-                v-model="filters.service"
-                :items="['', ...services]"
-                placeholder="All services"
-                hide-details density="compact" variant="outlined"
-                clearable style="font-size:11px"
-              />
-            </div>
+            <!-- Other sources: quick filters -->
+            <template v-else-if="source === 'logs'">
+              <v-tabs v-model="logsTab" density="compact" color="primary" class="mb-2" style="font-size:10px">
+                <v-tab value="selection" style="font-size:10px;min-width:0;padding:0 8px;">Selection</v-tab>
+                <v-tab value="logs" style="font-size:10px;min-width:0;padding:0 8px;">Logs</v-tab>
+              </v-tabs>
 
-            <div class="filter-row">
-              <label class="filter-label">Time range</label>
-              <div class="d-flex gap-1 flex-wrap">
-                <button v-for="r in RANGE_VALUES" :key="r" class="sz-btn mono" :class="{ active: filters.range === r }" @click="filters.range = r">{{ r }}</button>
+              <div v-show="logsTab === 'selection'">
+                <div class="filter-row">
+                  <label class="filter-label">Service</label>
+                  <v-select
+                    v-model="filters.service"
+                    :items="serviceOptions"
+                    placeholder="All services"
+                    hide-details density="compact" variant="outlined"
+                    clearable style="font-size:11px"
+                  />
+                </div>
+                <div class="filter-row">
+                  <label class="filter-label">Range</label>
+                  <div class="d-flex flex-wrap gap-1">
+                    <button
+                      v-for="r in RANGE_VALUES" :key="r"
+                      class="sz-btn" :class="{ active: filters.range === r }"
+                      @click="filters.range = r"
+                    >{{ r }}</button>
+                  </div>
+                </div>
               </div>
-            </div>
 
-            <!-- traces extra -->
-            <template v-if="source === 'traces'">
-              <div class="filter-row">
-                <label class="filter-label">Operation</label>
-                <v-text-field v-model="filters.operation" placeholder="GET /api/..." hide-details density="compact" variant="outlined" clearable style="font-size:11px" />
-              </div>
-              <div class="filter-row">
-                <label class="filter-label">Status</label>
-                <v-btn-toggle v-model="filters.status" density="compact" class="mt-1" variant="outlined">
-                  <v-btn size="x-small" value="">Any</v-btn>
-                  <v-btn size="x-small" value="ok">OK</v-btn>
-                  <v-btn size="x-small" value="error" color="error">Error</v-btn>
-                </v-btn-toggle>
-              </div>
-              <div class="filter-row">
-                <label class="filter-label">Limit</label>
-                <v-select v-model="filters.limit" :items="['25','50','100','200']" hide-details density="compact" variant="outlined" style="font-size:11px" />
+              <div v-show="logsTab === 'logs'">
+                <div class="filter-row">
+                  <label class="filter-label">Operation</label>
+                  <v-text-field v-model="filters.operation" placeholder="GET /api/..." hide-details density="compact" variant="outlined" clearable style="font-size:11px" />
+                </div>
+                <div class="filter-row">
+                  <label class="filter-label">Severity</label>
+                  <div class="d-flex flex-wrap gap-1 mt-1">
+                    <button
+                      v-for="sev in ['DEBUG','INFO','WARN','ERROR','FATAL']" :key="sev"
+                      class="sz-btn mono" :class="{ active: filters.severity === sev }"
+                      :style="filters.severity === sev ? `background:${sevColor(sev)}22;border-color:${sevColor(sev)}88;color:${sevColor(sev)}` : ''"
+                      @click="filters.severity = filters.severity === sev ? '' : sev"
+                    >{{ sev }}</button>
+                  </div>
+                </div>
+                <div class="filter-row">
+                  <label class="filter-label">Status</label>
+                  <v-btn-toggle v-model="filters.status" density="compact" class="mt-1" variant="outlined">
+                    <v-btn size="x-small" value="">Any</v-btn>
+                    <v-btn size="x-small" value="ok">OK</v-btn>
+                    <v-btn size="x-small" value="error" color="error">Error</v-btn>
+                  </v-btn-toggle>
+                </div>
+                <div class="filter-row">
+                  <label class="filter-label">Search</label>
+                  <v-text-field v-model="filters.search" placeholder="keyword..." hide-details density="compact" variant="outlined" clearable style="font-size:11px" />
+                </div>
+                <div class="filter-row">
+                  <label class="filter-label">Limit</label>
+                  <v-select v-model="filters.limit" :items="['50','100','200','500']" hide-details density="compact" variant="outlined" style="font-size:11px" />
+                </div>
               </div>
             </template>
 
-            <!-- logs extra -->
-            <template v-if="source === 'logs'">
+            <template v-else>
               <div class="filter-row">
-                <label class="filter-label">Severity</label>
-                <div class="d-flex flex-wrap gap-1 mt-1">
+                <label class="filter-label">Service</label>
+                <v-select
+                  v-model="filters.service"
+                  :items="serviceOptions"
+                  placeholder="All services"
+                  hide-details density="compact" variant="outlined"
+                  clearable style="font-size:11px"
+                />
+              </div>
+              <div class="filter-row">
+                <label class="filter-label">Range</label>
+                <div class="d-flex flex-wrap gap-1">
                   <button
-                    v-for="sev in ['DEBUG','INFO','WARN','ERROR','FATAL']" :key="sev"
-                    class="sz-btn mono" :class="{ active: filters.severity === sev }"
-                    :style="filters.severity === sev ? `background:${sevColor(sev)}22;border-color:${sevColor(sev)}88;color:${sevColor(sev)}` : ''"
-                    @click="filters.severity = filters.severity === sev ? '' : sev"
-                  >{{ sev }}</button>
+                    v-for="r in RANGE_VALUES" :key="r"
+                    class="sz-btn" :class="{ active: filters.range === r }"
+                    @click="filters.range = r"
+                  >{{ r }}</button>
                 </div>
               </div>
-              <div class="filter-row">
-                <label class="filter-label">Search</label>
-                <v-text-field v-model="filters.search" placeholder="keyword..." hide-details density="compact" variant="outlined" clearable style="font-size:11px" />
-              </div>
-              <div class="filter-row">
-                <label class="filter-label">Limit</label>
-                <v-select v-model="filters.limit" :items="['50','100','200','500']" hide-details density="compact" variant="outlined" style="font-size:11px" />
-              </div>
+              <template v-if="source === 'traces'">
+                <div class="filter-row">
+                  <label class="filter-label">Operation</label>
+                  <v-text-field v-model="filters.operation" placeholder="GET /api/..." hide-details density="compact" variant="outlined" clearable style="font-size:11px" />
+                </div>
+                <div class="filter-row">
+                  <label class="filter-label">Status</label>
+                  <v-btn-toggle v-model="filters.status" density="compact" class="mt-1" variant="outlined">
+                    <v-btn size="x-small" value="">Any</v-btn>
+                    <v-btn size="x-small" value="ok">OK</v-btn>
+                    <v-btn size="x-small" value="error" color="error">Error</v-btn>
+                  </v-btn-toggle>
+                </div>
+                <div class="filter-row">
+                  <label class="filter-label">Limit</label>
+                  <v-select v-model="filters.limit" :items="['25','50','100','200']" hide-details density="compact" variant="outlined" style="font-size:11px" />
+                </div>
+              </template>
             </template>
           </div>
 
@@ -171,7 +216,7 @@
           </div>
         </div>
 
-        <!-- ── Preview ── -->
+        <!-- ── Preview (right side) ── -->
         <div class="editor-preview">
           <div v-if="!source" class="preview-empty d-flex flex-column align-center justify-center h-100">
             <v-icon size="48" color="grey-darken-2">mdi-chart-box-outline</v-icon>
@@ -182,7 +227,9 @@
               Live preview
               <span v-if="generatedQuery" class="ml-2 mono" style="font-size:10px;color:#6366f1">{{ generatedQuery }}</span>
             </div>
-            <PanelViz :key="previewKey" :query="generatedQuery" :height="previewHeight" />
+            <div class="preview-content">
+              <PanelViz :key="previewKey" :query="generatedQuery" />
+            </div>
           </template>
         </div>
 
@@ -209,7 +256,6 @@ const open = computed({ get: () => props.modelValue, set: v => emit('update:mode
 const title   = ref('')
 const source  = ref('')
 const viz     = ref('')
-const size    = ref('md')
 const filters = ref(emptyFilters())
 
 const catalog         = ref([])
@@ -217,14 +263,13 @@ const metricSearch    = ref('')
 const metricTypeFilter = ref('')
 const services        = ref([])
 const previewKey      = ref(0)
+const logsTab         = ref('selection')
 
-const sizes = [{ v: 'sm', l: '¼' }, { v: 'md', l: '½' }, { v: 'lg', l: '¾' }, { v: 'full', l: '■' }]
+const metricTypes = ['', 'gauge', 'sum', 'histogram', 'summary']
 
 function emptyFilters() {
   return { service: '', range: '1h', name: '', operation: '', status: '', severity: '', search: '', limit: '50' }
 }
-
-const previewHeight = computed(() => Math.max(300, (typeof window !== 'undefined' ? window.innerHeight : 700) - 160))
 
 // ─── Catalog filtering ────────────────────────────────────────────────────
 const filteredCatalog = computed(() => {
@@ -237,6 +282,7 @@ const filteredCatalog = computed(() => {
 
 // ─── Viz options for current source ──────────────────────────────────────
 const currentVizOptions = computed(() => source.value ? SOURCES[source.value]?.vizOptions || [] : [])
+const serviceOptions = computed(() => services.value.map(s => ({ title: s, value: s })))
 
 // ─── Generated query ──────────────────────────────────────────────────────
 const generatedQuery = computed(() => {
@@ -264,6 +310,7 @@ watch(generatedQuery, triggerPreview)
 function selectSource(src) {
   source.value = src
   viz.value    = SOURCES[src]?.defaultViz || ''
+  if (src === 'logs') logsTab.value = 'selection'
 }
 
 function selectMetric(m) {
@@ -271,7 +318,7 @@ function selectMetric(m) {
   filters.value.service = m.service
 }
 
-function apply()  { emit('apply', { title: title.value, query: generatedQuery.value, size: size.value }); open.value = false }
+function apply()  { emit('apply', { title: title.value, query: generatedQuery.value }); open.value = false }
 function cancel() { open.value = false }
 
 // ─── Pre-fill from existing panel ─────────────────────────────────────────
@@ -279,12 +326,12 @@ function prefill() {
   const p = props.panel
   if (!p) { reset(); return }
   title.value = p.title || ''
-  size.value  = p.size  || 'md'
   const q = (p.query || '').trim()
   if (!q) { reset(); return }
   const tokens = q.split(/\s+/)
   source.value = tokens[0] || ''
   viz.value    = SOURCES[source.value]?.defaultViz || ''
+  if (source.value === 'logs') logsTab.value = 'selection'
   const f = emptyFilters()
   for (let i = 1; i < tokens.length; i++) {
     const eq = tokens[i].indexOf('=')
@@ -297,8 +344,9 @@ function prefill() {
 }
 
 function reset() {
-  title.value = ''; source.value = ''; viz.value = ''; size.value = 'md'
+  title.value = ''; source.value = ''; viz.value = ''
   filters.value = emptyFilters()
+  logsTab.value = 'selection'
 }
 
 // ─── Data loading ─────────────────────────────────────────────────────────
@@ -351,6 +399,7 @@ function vizDesc(v)  { return VIZ_META[v]?.desc  || '' }
 
 function typeIcon(t)  { return { gauge: '◉', sum: '∑', histogram: '▦', summary: '◈' }[t] || '◌' }
 function typeBadgeColor(t) { return { gauge: '#8b5cf6', sum: '#3b82f6', histogram: '#f97316', summary: '#14b8a6' }[t] || '#64748b' }
+function typeColor(t) { return { gauge: '#8b5cf6', sum: '#3b82f6', histogram: '#f97316', summary: '#14b8a6' }[t] || '#64748b' }
 function sevColor(s) { return { ERROR: '#ef4444', FATAL: '#dc2626', WARN: '#f59e0b', INFO: '#6366f1', DEBUG: '#64748b', TRACE: '#475569' }[s] || '#64748b' }
 </script>
 
@@ -359,32 +408,40 @@ function sevColor(s) { return { ERROR: '#ef4444', FATAL: '#dc2626', WARN: '#f59e
 
 .editor-root {
   display: flex; flex-direction: column; height: 100vh;
-  background: rgb(var(--v-theme-background)); overflow: hidden;
+  background: rgb(var(--v-theme-surface)) !important; overflow: hidden;
 }
 
 /* Top bar */
 .editor-topbar {
   display: flex; align-items: center; gap: 6px;
   padding: 7px 14px; flex-shrink: 0;
-  border-bottom: 1px solid rgba(255,255,255,0.07);
-  background: rgb(var(--v-theme-surface));
+  border-bottom: 1px solid var(--telm-border);
+  background: rgb(var(--v-theme-surface)) !important;
 }
 
 /* Body */
-.editor-body { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+.editor-body { 
+  display: flex; 
+  flex: 1; 
+  min-height: 0; 
+  overflow: hidden; 
+  height: 100%; 
+}
 
 /* Sidebar */
 .editor-sidebar {
-  width: 280px; flex-shrink: 0;
-  border-right: 1px solid rgba(255,255,255,0.07);
-  overflow-y: auto; background: rgb(var(--v-theme-surface));
+  width: 280px; 
+  flex-shrink: 0;
+  border-right: 1px solid var(--telm-border);
+  overflow-y: auto; 
+  background: rgb(var(--v-theme-surface)) !important;
 }
 
-.sidebar-section { padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,0.04); }
+.sidebar-section { padding: 10px 12px; border-bottom: 1px solid var(--telm-border-light); }
 
 .sidebar-step {
   font-size: 10px; font-weight: 600; letter-spacing: 0.07em;
-  text-transform: uppercase; color: #64748b; margin-bottom: 8px;
+  text-transform: uppercase; color: var(--telm-text-3); margin-bottom: 8px;
 }
 
 /* Sources */
@@ -394,22 +451,22 @@ function sevColor(s) { return { ERROR: '#ef4444', FATAL: '#dc2626', WARN: '#f59e
   border: none; background: transparent; color: inherit;
   font-size: 11px; cursor: pointer; text-align: left; transition: background 0.1s; width: 100%;
 }
-.source-item:hover  { background: rgba(255,255,255,0.05); }
+.source-item:hover  { background: var(--telm-bg-hover); }
 .source-item.active { background: rgba(99,102,241,0.14); color: #a5b4fc; }
 .source-label { font-size: 11px; font-weight: 500; }
-.source-sub   { font-size: 9px; color: #64748b; }
+.source-sub   { font-size: 9px; color: var(--telm-text-3); }
 
 /* Metric catalog */
 .metric-list {
   max-height: 240px; overflow-y: auto; margin: 0 -12px;
-  border-top: 1px solid rgba(255,255,255,0.04);
+  border-top: 1px solid var(--telm-border-light);
 }
 .metric-item {
   display: flex; align-items: center; padding: 5px 12px;
-  cursor: pointer; border-bottom: 1px solid rgba(255,255,255,0.03);
+  cursor: pointer; border-bottom: 1px solid var(--telm-border-light);
   transition: background 0.1s;
 }
-.metric-item:hover  { background: rgba(255,255,255,0.04); }
+.metric-item:hover  { background: var(--telm-bg-hover); }
 .metric-item.active { background: rgba(99,102,241,0.12); }
 .type-badge {
   font-size: 9px; font-weight: 600; padding: 1px 5px; border-radius: 4px;
@@ -418,38 +475,62 @@ function sevColor(s) { return { ERROR: '#ef4444', FATAL: '#dc2626', WARN: '#f59e
 
 /* Filters */
 .filter-row   { margin-bottom: 8px; }
-.filter-label { display: block; font-size: 10px; color: #64748b; margin-bottom: 3px; }
+.filter-label { display: block; font-size: 10px; color: var(--telm-text-3); margin-bottom: 3px; }
 
 /* Viz grid */
 .viz-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
 .viz-card {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   padding: 8px 4px; border-radius: 7px;
-  border: 1px solid rgba(255,255,255,0.08);
+  border: 1px solid var(--telm-border);
   background: transparent; cursor: pointer; transition: all 0.12s;
 }
-.viz-card:hover  { border-color: rgba(99,102,241,0.35); background: rgba(99,102,241,0.06); }
+.viz-card:hover  { border-color: rgba(99,102,241,0.35); background: var(--telm-bg-hover); }
 .viz-card.active { border-color: rgba(99,102,241,0.6); background: rgba(99,102,241,0.14); }
 .viz-card-label  { font-size: 10px; font-weight: 600; margin-top: 4px; color: inherit; }
-.viz-card-sub    { font-size: 9px; color: #64748b; margin-top: 1px; }
+.viz-card-sub    { font-size: 9px; color: var(--telm-text-3); margin-top: 1px; }
 
 /* Query preview */
 .query-preview {
   font-size: 10px; color: #6366f1;
-  background: rgba(99,102,241,0.08); border-radius: 4px;
+  background: var(--telm-bg-hover); border-radius: 4px;
   padding: 6px 8px; white-space: pre-wrap; word-break: break-all; margin: 0;
 }
 
 /* Preview area */
-.editor-preview { flex: 1; overflow-y: auto; padding: 14px; min-width: 0; }
-.preview-topbar { font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase; }
-.preview-empty  { min-height: 300px; }
+.editor-preview { 
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: rgb(var(--v-theme-surface));
+}
+.preview-topbar { 
+  font-size: 10px; 
+  letter-spacing: 0.05em; 
+  text-transform: uppercase; 
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--telm-border-light);
+  flex-shrink: 0;
+}
+.preview-content {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.preview-empty  { 
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
 
 /* Size / range buttons */
 .sz-btn {
   font-size: 10px; padding: 2px 7px; border-radius: 4px;
-  border: 1px solid rgba(255,255,255,0.1); background: transparent;
-  color: #64748b; cursor: pointer; transition: all 0.1s;
+  border: 1px solid var(--telm-border); background: transparent;
+  color: var(--telm-text-3); cursor: pointer; transition: all 0.1s;
 }
 .sz-btn:hover  { border-color: rgba(99,102,241,0.4); color: #a5b4fc; }
 .sz-btn.active { background: rgba(99,102,241,0.2); border-color: rgba(99,102,241,0.5); color: #a5b4fc; }
