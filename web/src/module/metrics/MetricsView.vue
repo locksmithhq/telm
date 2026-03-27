@@ -298,11 +298,13 @@ async function renderChart(m, range) {
         minute: "2-digit",
       });
     });
-    // sum → taxa por segundo (total_sum / bucket_duration)
+    // sum → total_sum / bucket_duration; histogram → total_count / bucket_duration (req/s real)
     const bktSec = bucketSeconds(range);
-    const isRate = m.type === "sum";
+    const isRate = m.type === "sum" || m.type === "histogram";
     const vals = pts.map((p) => {
-      if (isRate && p.total_sum != null)
+      if (m.type === "histogram" && p.total_count != null)
+        return +((p.total_count / bktSec).toFixed(4));
+      if (m.type === "sum" && p.total_sum != null)
         return +((p.total_sum / bktSec).toFixed(4));
       if (p.avg_value != null) return +p.avg_value.toFixed(4);
       return p.total_count || 0;

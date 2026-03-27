@@ -9,7 +9,7 @@
       <v-divider vertical class="my-1" opacity="0.2" />
 
       <!-- Trace meta -->
-      <div class="d-flex align-center gap-3 flex-grow-1 flex-wrap">
+      <div class="d-flex align-center gap-3 flex-grow-1 flex-wrap pl-2">
         <div class="d-flex align-center gap-1">
           <span class="text-disabled mono" style="font-size:10px;letter-spacing:.04em">TRACE</span>
           <code class="mono" style="font-size:11px;color:var(--telm-text-2)">{{ traceId }}</code>
@@ -607,7 +607,7 @@ watch(traceId, async (id) => {
   border-bottom: 1px solid var(--telm-border);
 }
 
-.span-row { border-bottom: 1px solid var(--telm-border-light); }
+.span-row { border-bottom: 1px solid var(--telm-border-light); background: var(--telm-bg-row); }
 .span-row:last-child { border-bottom: none; }
 .span-main:hover { background: var(--telm-bg-hover); }
 .span-open .span-main { background: var(--telm-bg-hover); }
@@ -707,7 +707,7 @@ watch(traceId, async (id) => {
 .attr-row:hover .attr-copy { opacity: 1; }
 
 /* Events */
-.event-row { background: rgba(245,158,11,.05); border: 1px solid rgba(245,158,11,.12); }
+.event-row { background: var(--telm-bg-row); border: 1px solid var(--telm-border); }
 
 /* Operation truncate */
 .op-truncate {
@@ -722,10 +722,12 @@ watch(traceId, async (id) => {
 .log-list {
   display: flex;
   flex-direction: column;
+  background: var(--telm-bg-row);
 }
 .log-entry {
   padding: 5px 14px;
   border-bottom: 1px solid var(--telm-border-light);
+  background: var(--telm-bg-row);
 }
 .log-entry:last-child { border-bottom: none; }
 .log-entry-full { padding: 6px 16px; }
