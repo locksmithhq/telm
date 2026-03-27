@@ -144,15 +144,27 @@ export function parse(queryStr) {
 }
 
 // ─── Executor ──────────────────────────────────────────────────────────────
+const RANGE_MINS = {
+  '1m': 1, '5m': 5, '15m': 15, '30m': 30,
+  '1h': 60, '3h': 180, '6h': 360, '12h': 720,
+  '24h': 1440, '2d': 2880, '7d': 10080,
+}
+
 export function rangeToParams(range) {
-  const to = new Date()
-  const mins = { '1h': 60, '6h': 360, '24h': 1440, '7d': 10080 }
-  const from = new Date(to - (mins[range] || 60) * 60_000)
+  const to   = new Date()
+  const from = new Date(to - (RANGE_MINS[range] || 60) * 60_000)
   return { from: from.toISOString(), to: to.toISOString() }
 }
 
+// Deve bater com intervalFor() do backend (stats.go):
+//   d <= 3h  → "minute" (60s)
+//   d <= 7d  → "hour"   (3600s)
+//   else     → "day"    (86400s)
 export function bucketSecs(range) {
-  return { '1h': 60, '6h': 300, '24h': 1800, '7d': 3600 }[range] || 60
+  return {
+    '1m': 60, '5m': 60, '15m': 60, '30m': 60, '1h': 60, '3h': 60,
+    '6h': 3600, '12h': 3600, '24h': 3600, '2d': 3600, '7d': 3600,
+  }[range] || 60
 }
 
 export function fmtLabel(iso, range) {
@@ -178,9 +190,9 @@ export async function execute(parsed) {
   if (limit) qp.limit = parseInt(limit) || 50
 
   const { data } = await api.get(def.endpoint, { params: qp })
-  return { data: data || [], returns: def.returns, viz, range }
+  return { data: data || [], returns: def.returns, viz, range, metricName: name || '' }
 }
 
 // ─── Autocomplete helpers ──────────────────────────────────────────────────
-export const RANGE_VALUES = ['1h', '6h', '24h', '7d']
+export const RANGE_VALUES = ['1m', '5m', '15m', '30m', '1h', '3h', '6h', '12h', '24h', '2d', '7d']
 export const ALL_PARAMS = ['service', 'name', 'range', 'operation', 'status', 'severity', 'search', 'limit', 'viz']

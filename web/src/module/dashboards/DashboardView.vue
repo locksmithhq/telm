@@ -25,6 +25,17 @@
 
       <v-spacer />
 
+      <!-- Time range picker — Datadog style -->
+      <div class="range-picker">
+        <button
+          v-for="r in RANGE_VALUES"
+          :key="r"
+          class="range-btn"
+          :class="{ active: dashRange === r }"
+          @click="dashRange = r"
+        >{{ r }}</button>
+      </div>
+
       <v-btn size="small" color="primary" variant="flat" prepend-icon="mdi-plus" @click="openEditor(null)">
         Add panel
       </v-btn>
@@ -61,6 +72,7 @@
       >
         <PanelCard
           :panel="p"
+          :dash-range="dashRange"
           @edit="openEditor(p)"
           @remove="removePanel(p)"
         />
@@ -84,42 +96,43 @@ import { useRoute } from 'vue-router'
 import { VueDraggable } from 'vue-draggable-plus'
 import PanelCard from './PanelCard.vue'
 import PanelEditor from './PanelEditor.vue'
-import { loadAll, saveAll, newPanel } from './store.js'
+import { loadAll, update, newPanel } from './store.js'
+import { RANGE_VALUES } from './tql.js'
+import api from '@/plugins/axios'
 
 const route = useRoute()
 
 const dashboard    = ref({ name: '', panels: [] })
-// Separate top-level ref so VueDraggable can replace the array properly
 const panels       = ref([])
 const editingName  = ref(false)
 const nameInput    = ref('')
 const editorOpen   = ref(false)
 const editingPanel = ref(null)
+const dashRange    = ref('1h')
 
-// ─── Load / persist ────────────────────────────────────────────────────────
-function load() {
-  const list  = loadAll()
-  const found = list.find((d) => d.id === route.params.id)
-  if (found) {
-    dashboard.value = JSON.parse(JSON.stringify(found))
-    panels.value    = dashboard.value.panels
+async function load() {
+  try {
+    const { data } = await api.get(`/dashboards/${route.params.id}`)
+    dashboard.value = data
+    panels.value = data.panels || []
+  } catch (e) {
+    console.error('Failed to load dashboard:', e)
   }
 }
 
-function persist() {
-  const list = loadAll()
-  const idx  = list.findIndex((d) => d.id === dashboard.value.id)
-  if (idx !== -1) { list[idx] = dashboard.value; saveAll(list) }
-  else            { list.push(dashboard.value);   saveAll(list) }
+async function persist() {
+  try {
+    await update(dashboard.value)
+  } catch (e) {
+    console.error('Failed to save dashboard:', e)
+  }
 }
 
-// Called after VueDraggable reorders panels
 function syncAndPersist() {
   dashboard.value.panels = panels.value
   persist()
 }
 
-// ─── Panel CRUD ────────────────────────────────────────────────────────────
 function openEditor(panel) {
   editingPanel.value = panel
   editorOpen.value   = true
@@ -141,16 +154,14 @@ function removePanel(p) {
   syncAndPersist()
 }
 
-// ─── Resize handles ───────────────────────────────────────────────────────
 const GRID_COLS = 4
-const ROW_H     = 80   // px per row unit (matches grid-auto-rows in CSS)
+const ROW_H     = 80
 const GAP       = 10
 
 const resizingId   = ref(null)
 const resizingCols = ref(2)
 const resizingRows = ref(3)
 
-// Backward compat: panels saved with old size/height fields
 function panelCols(p) { return p.cols ?? { sm: 1, md: 2, lg: 3, full: 4 }[p.size] ?? 2 }
 function panelRows(p) { return p.rows ?? Math.max(2, Math.ceil((p.height || 240) / ROW_H)) }
 
@@ -236,15 +247,14 @@ function startCornerResize(event, panel) {
   document.addEventListener('mouseup',   onUp)
 }
 
-// ─── Rename ────────────────────────────────────────────────────────────────
 function startRename() {
   nameInput.value  = dashboard.value.name
   editingName.value = true
 }
-function confirmRename() {
+async function confirmRename() {
   if (nameInput.value.trim()) dashboard.value.name = nameInput.value.trim()
   editingName.value = false
-  persist()
+  await persist()
 }
 
 onMounted(load)
@@ -338,4 +348,37 @@ watch(() => route.params.id, load)
 
 /* Empty state */
 .empty-state { min-height: 280px; text-align: center; }
+
+/* ─── Time range picker ─────────────────────────────────────────────────── */
+.range-picker {
+  display: flex;
+  align-items: center;
+  background: var(--telm-bg-row);
+  border: 1px solid var(--telm-border);
+  border-radius: 6px;
+  padding: 2px;
+  gap: 1px;
+}
+
+.range-btn {
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: none;
+  background: transparent;
+  color: var(--telm-text-3);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+  white-space: nowrap;
+}
+.range-btn:hover {
+  background: var(--telm-bg-hover);
+  color: var(--telm-text-1);
+}
+.range-btn.active {
+  background: #6366f1;
+  color: #fff;
+}
 </style>

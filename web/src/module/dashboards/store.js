@@ -1,32 +1,43 @@
-const KEY = 'telm-dashboards-v2'
+import api from "@/plugins/axios"
 
-export function loadAll() {
+export async function loadAll() {
   try {
-    return JSON.parse(localStorage.getItem(KEY) || '[]')
+    const { data } = await api.get("/dashboards")
+    return data || []
   } catch {
     return []
   }
 }
 
-export function saveAll(list) {
-  localStorage.setItem(KEY, JSON.stringify(list))
+export async function create(dashboard) {
+  const { data } = await api.post("/dashboards", dashboard)
+  return data
+}
+
+export async function update(dashboard) {
+  const { data } = await api.put(`/dashboards/${dashboard.id}`, dashboard)
+  return data
+}
+
+export async function remove(id) {
+  await api.delete(`/dashboards/${id}`)
 }
 
 export function newDashboard(name) {
   return {
     id: crypto.randomUUID(),
-    name: name || 'Untitled Dashboard',
+    name: name || "Untitled Dashboard",
     createdAt: new Date().toISOString(),
     panels: [],
   }
 }
 
-export function newPanel(query = '') {
+export function newPanel(query = "") {
   return {
     id: crypto.randomUUID(),
-    title: '',
+    title: "",
     query,
-    cols: 2,  // grid column span 1–4
-    rows: 3,  // grid row span  (each row = 80px)
+    cols: 2,
+    rows: 3,
   }
 }

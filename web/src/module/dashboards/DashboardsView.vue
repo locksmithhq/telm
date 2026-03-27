@@ -101,7 +101,7 @@
         <v-card-actions class="pa-3 pt-0">
           <v-spacer />
           <v-btn size="small" variant="text" @click="createDialog = false">Cancel</v-btn>
-          <v-btn size="small" color="primary" variant="flat" :disabled="!newName.trim()" @click="create">Create</v-btn>
+          <v-btn size="small" color="primary" variant="flat" :disabled="!newName.trim()" @click="doCreate">Create</v-btn>
         </v-card-actions>
       </v-card>
     </v-dialog>
@@ -130,7 +130,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { loadAll, saveAll, newDashboard } from './store.js'
+import { loadAll, create, update, remove, newDashboard } from './store.js'
 
 const router = useRouter()
 
@@ -141,35 +141,51 @@ const renameDialog = ref(false)
 const renameInput = ref('')
 let renamingId = null
 
-function load() { dashboards.value = loadAll() }
-function persist() { saveAll(dashboards.value) }
-
-function create() {
-  if (!newName.value.trim()) return
-  const d = newDashboard(newName.value.trim())
-  dashboards.value.push(d)
-  persist()
-  newName.value = ''
-  createDialog.value = false
-  router.push(`/dashboards/${d.id}`)
+async function load() {
+  dashboards.value = await loadAll()
 }
 
-function startRename(d) {
+async function doCreate() {
+  if (!newName.value.trim()) return
+  try {
+    const d = newDashboard(newName.value.trim())
+    await create(d)
+    dashboards.value.unshift(d)
+    newName.value = ''
+    createDialog.value = false
+    router.push(`/dashboards/${d.id}`)
+  } catch (e) {
+    console.error('Failed to create dashboard:', e)
+  }
+}
+
+async function startRename(d) {
   renamingId = d.id
   renameInput.value = d.name
   renameDialog.value = true
 }
 
-function confirmRename() {
+async function confirmRename() {
   if (!renameInput.value.trim()) return
   const d = dashboards.value.find((x) => x.id === renamingId)
-  if (d) { d.name = renameInput.value.trim(); persist() }
+  if (d) {
+    d.name = renameInput.value.trim()
+    try {
+      await update(d)
+    } catch (e) {
+      console.error('Failed to rename dashboard:', e)
+    }
+  }
   renameDialog.value = false
 }
 
-function deleteDashboard(d) {
-  dashboards.value = dashboards.value.filter((x) => x.id !== d.id)
-  persist()
+async function deleteDashboard(d) {
+  try {
+    await remove(d.id)
+    dashboards.value = dashboards.value.filter((x) => x.id !== d.id)
+  } catch (e) {
+    console.error('Failed to delete dashboard:', e)
+  }
 }
 
 function firstToken(query) {
@@ -190,6 +206,6 @@ onMounted(load)
 
 <style scoped>
 .mono { font-family: ui-monospace, 'JetBrains Mono', monospace; }
-.dashboard-card { cursor: pointer; transition: box-shadow 0.15s; }
+.dashboard-card { cursor: pointer; transition: box-shadow 0.15s; background: var(--telm-bg-row); }
 .empty-state { min-height: 300px; text-align: center; }
 </style>
