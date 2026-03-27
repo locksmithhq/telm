@@ -4,18 +4,32 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
 
 // ── Filter types ──────────────────────────────────────────────────────────────
 
+type AttrFilter struct {
+	Key    string
+	Value  string
+	Invert bool
+}
+
 type TraceFilter struct {
-	Service   string
-	Operation string
-	From      time.Time
-	To        time.Time
-	Limit     int
+	Service       string
+	Operation     string
+	From          time.Time
+	To            time.Time
+	Limit         int
+	TraceID       string
+	StatusCodes   []int
+	Kinds         []int
+	DurationMinMs int64
+	DurationMaxMs int64
+	MinSpanCount  int64
+	Attributes    []AttrFilter
 }
 
 type MetricFilter struct {
@@ -35,12 +49,16 @@ type MetricSeriesFilter struct {
 }
 
 type LogFilter struct {
-	Service  string
-	Severity string
-	Search   string
-	From     time.Time
-	To       time.Time
-	Limit    int
+	Service     string
+	Severity    string
+	Search      string
+	Operation   string
+	HasError    bool
+	HasTrace    bool
+	AttrFilters []AttrFilter
+	From        time.Time
+	To          time.Time
+	Limit       int
 }
 
 // ── Query result types (com json tags para a API) ─────────────────────────────
@@ -83,15 +101,15 @@ type QueryMetric struct {
 }
 
 type MetricCatalogEntry struct {
-	Name      string    `db:"metric_name"  json:"name"`
-	Type      string    `db:"metric_type"  json:"type"`
-	Service   string    `db:"service_name" json:"service"`
-	Unit      *string   `db:"unit"         json:"unit"`
-	ValueDouble *float64 `db:"value_double" json:"value_double"`
-	ValueInt    *int64   `db:"value_int"    json:"value_int"`
-	Count     *int64    `db:"metric_count" json:"count"`
-	Sum       *float64  `db:"metric_sum"   json:"sum"`
-	Timestamp time.Time `db:"timestamp"    json:"timestamp"`
+	Name        string    `db:"metric_name"  json:"name"`
+	Type        string    `db:"metric_type"  json:"type"`
+	Service     string    `db:"service_name" json:"service"`
+	Unit        *string   `db:"unit"         json:"unit"`
+	ValueDouble *float64  `db:"value_double" json:"value_double"`
+	ValueInt    *int64    `db:"value_int"    json:"value_int"`
+	Count       *int64    `db:"metric_count" json:"count"`
+	Sum         *float64  `db:"metric_sum"   json:"sum"`
+	Timestamp   time.Time `db:"timestamp"    json:"timestamp"`
 }
 
 type MetricSeriesPoint struct {
@@ -118,33 +136,141 @@ type QueryLog struct {
 
 // QuerySpans retorna apenas root spans (parent_span_id IS NULL) para a listagem,
 // incluindo a lista de serviços distintos envolvidos em cada trace.
+// Usa CTEs encadeadas com JOINs — sem subqueries correlacionadas.
 func (c *Client) QuerySpans(ctx context.Context, f TraceFilter) ([]QuerySpan, error) {
 	setTraceDefaults(&f)
 
-	const q = `
-		WITH roots AS (
-			SELECT trace_id, span_id, parent_span_id, operation_name, service_name,
-			       start_time, end_time, duration_ns, status_code, kind,
-			       COALESCE(attributes, '{}') AS attributes, COALESCE(events, '[]') AS events
-			FROM traces
-			WHERE parent_span_id IS NULL
-			  AND ($1 = '' OR service_name = $1)
-			  AND ($2 = '' OR operation_name ILIKE '%' || $2 || '%')
-			  AND start_time >= $3
-			  AND start_time <= $4
-			ORDER BY start_time DESC
-			LIMIT $5
-		)
-		SELECT r.trace_id, r.span_id, r.parent_span_id, r.operation_name, r.service_name,
-		       r.start_time, r.end_time, r.duration_ns, r.status_code, r.kind,
-		       COALESCE(r.attributes, '{}') AS attributes, COALESCE(r.events, '[]') AS events,
-		       (SELECT COUNT(*) FROM traces WHERE trace_id = r.trace_id) AS span_count,
-		       (
-		           SELECT STRING_AGG(svc, ',' ORDER BY svc)
-		           FROM (SELECT DISTINCT service_name AS svc FROM traces WHERE trace_id = r.trace_id) sub
-		       ) AS services_list
-		FROM roots r
-		ORDER BY r.start_time DESC`
+	var ctes      strings.Builder // "attr_N AS (...),\n" por filtro de atributo
+	var joins      strings.Builder // JOIN/LEFT JOIN attr_N por filtro
+	var rootWhere  strings.Builder // filtros escalares do CTE roots
+	var args       []any
+
+	add := func(v any) int {
+		args = append(args, v)
+		return len(args)
+	}
+
+	// ── filtros escalares ────────────────────────────────────────────────────
+	opN   := add(f.Operation)
+	fromN := add(f.From)
+	toN   := add(f.To)
+	fmt.Fprintf(&rootWhere, "        AND ($%d = '' OR t.operation_name ILIKE '%%' || $%d || '%%')\n", opN, opN)
+	fmt.Fprintf(&rootWhere, "        AND t.start_time >= $%d\n", fromN)
+	fmt.Fprintf(&rootWhere, "        AND t.start_time <= $%d\n", toN)
+
+	// Filtro de serviço: busca trace_ids onde QUALQUER span pertence ao serviço,
+	// não apenas o root span — permite encontrar traces distribuídos por serviço interno.
+	if f.Service != "" {
+		svcN := add(f.Service)
+		fmt.Fprintf(&ctes,
+			"    svc_traces AS (\n"+
+				"        SELECT DISTINCT trace_id FROM traces\n"+
+				"        WHERE service_name = $%d\n"+
+				"          AND start_time >= $%d AND start_time <= $%d\n"+
+				"    ),\n",
+			svcN, fromN, toN)
+		joins.WriteString("        JOIN svc_traces ON t.trace_id = svc_traces.trace_id\n")
+	}
+
+	if f.TraceID != "" {
+		fmt.Fprintf(&rootWhere, "        AND t.trace_id = $%d\n", add(f.TraceID))
+	}
+	if len(f.StatusCodes) > 0 {
+		rootWhere.WriteString("        AND t.status_code IN (")
+		for i, v := range f.StatusCodes {
+			if i > 0 {
+				rootWhere.WriteString(", ")
+			}
+			fmt.Fprintf(&rootWhere, "$%d", add(v))
+		}
+		rootWhere.WriteString(")\n")
+	}
+	if len(f.Kinds) > 0 {
+		rootWhere.WriteString("        AND t.kind IN (")
+		for i, v := range f.Kinds {
+			if i > 0 {
+				rootWhere.WriteString(", ")
+			}
+			fmt.Fprintf(&rootWhere, "$%d", add(v))
+		}
+		rootWhere.WriteString(")\n")
+	}
+	if f.DurationMinMs > 0 {
+		fmt.Fprintf(&rootWhere, "        AND t.duration_ns >= $%d\n", add(f.DurationMinMs*1_000_000))
+	}
+	if f.DurationMaxMs > 0 {
+		fmt.Fprintf(&rootWhere, "        AND t.duration_ns <= $%d\n", add(f.DurationMaxMs*1_000_000))
+	}
+
+	// ── filtros de atributo: 1 CTE por filtro + JOIN no roots ───────────────
+	attrIdx := 0
+	for _, attr := range f.Attributes {
+		if attr.Key == "" {
+			continue
+		}
+		cteName := fmt.Sprintf("attr_%d", attrIdx)
+		attrIdx++
+
+		kn := add(attr.Key)
+		if attr.Value != "" {
+			vn := add(attr.Value)
+			fmt.Fprintf(&ctes,
+				"    %s AS (\n"+
+					"        SELECT DISTINCT trace_id FROM traces\n"+
+					"        WHERE attributes::jsonb ->> $%d = $%d\n"+
+					"    ),\n",
+				cteName, kn, vn)
+		} else {
+			fmt.Fprintf(&ctes,
+				"    %s AS (\n"+
+					"        SELECT DISTINCT trace_id FROM traces\n"+
+					"        WHERE attributes::jsonb ? $%d\n"+
+					"    ),\n",
+				cteName, kn)
+		}
+
+		if attr.Invert {
+			fmt.Fprintf(&joins, "        LEFT JOIN %s ON t.trace_id = %s.trace_id\n", cteName, cteName)
+			fmt.Fprintf(&rootWhere, "        AND %s.trace_id IS NULL\n", cteName)
+		} else {
+			fmt.Fprintf(&joins, "        JOIN %s ON t.trace_id = %s.trace_id\n", cteName, cteName)
+		}
+	}
+
+	limitN   := add(f.Limit)
+	minSpanN := add(f.MinSpanCount)
+
+	q := fmt.Sprintf(`
+WITH
+%s    roots AS (
+        SELECT t.trace_id, t.span_id, t.parent_span_id, t.operation_name, t.service_name,
+               t.start_time, t.end_time, t.duration_ns, t.status_code, t.kind,
+               COALESCE(t.attributes, '{}') AS attributes,
+               COALESCE(t.events,     '[]') AS events
+        FROM traces t
+%s        WHERE t.parent_span_id IS NULL
+%s        ORDER BY t.start_time DESC
+        LIMIT $%d
+    ),
+    trace_stats AS (
+        SELECT t.trace_id,
+               COUNT(*) AS span_count,
+               STRING_AGG(DISTINCT t.service_name, ',' ORDER BY t.service_name) AS services_list
+        FROM traces t
+        JOIN roots r ON t.trace_id = r.trace_id
+        GROUP BY t.trace_id
+    )
+SELECT r.trace_id, r.span_id, r.parent_span_id, r.operation_name, r.service_name,
+       r.start_time, r.end_time, r.duration_ns, r.status_code, r.kind,
+       r.attributes, r.events,
+       ts.span_count,
+       COALESCE(ts.services_list, r.service_name) AS services_list
+FROM roots r
+JOIN trace_stats ts ON r.trace_id = ts.trace_id
+WHERE ($%d = 0 OR ts.span_count >= $%d)
+ORDER BY r.start_time DESC`,
+		ctes.String(), joins.String(), rootWhere.String(),
+		limitN, minSpanN, minSpanN)
 
 	type rootSpanScan struct {
 		TraceID      string    `db:"trace_id"`
@@ -163,7 +289,7 @@ func (c *Client) QuerySpans(ctx context.Context, f TraceFilter) ([]QuerySpan, er
 		ServicesList string    `db:"services_list"`
 	}
 
-	rows, err := c.db.QueryxContext(ctx, q, f.Service, f.Operation, f.From, f.To, f.Limit)
+	rows, err := c.db.QueryxContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -295,8 +421,14 @@ func (c *Client) QueryMetricSeries(ctx context.Context, f MetricSeriesFilter) ([
 	q := fmt.Sprintf(`
 		SELECT date_trunc('%s', timestamp) AS bucket,
 		       AVG(COALESCE(value_double, value_int::float8)) AS avg_value,
-		       SUM(metric_count) AS total_count,
-		       SUM(metric_sum)   AS total_sum
+		       CASE WHEN MAX(aggregation_temporality) = 2
+		            THEN GREATEST(MAX(metric_count) - MIN(metric_count), 0)
+		            ELSE SUM(metric_count)
+		       END AS total_count,
+		       CASE WHEN MAX(aggregation_temporality) = 2
+		            THEN GREATEST(MAX(metric_sum) - MIN(metric_sum), 0)
+		            ELSE SUM(metric_sum)
+		       END AS total_sum
 		FROM metrics
 		WHERE metric_name = $1
 		  AND ($2 = '' OR service_name = $2)
@@ -318,17 +450,64 @@ func (c *Client) QueryMetricSeries(ctx context.Context, f MetricSeriesFilter) ([
 func (c *Client) QueryLogs(ctx context.Context, f LogFilter) ([]QueryLog, error) {
 	setLogDefaults(&f)
 
-	const q = `
+	var where strings.Builder
+	var args []any
+
+	add := func(v any) int {
+		args = append(args, v)
+		return len(args)
+	}
+
+	if f.Service != "" {
+		where.WriteString(fmt.Sprintf(" AND service_name = $%d", add(f.Service)))
+	}
+	if f.Severity != "" {
+		where.WriteString(fmt.Sprintf(" AND UPPER(severity_text) = UPPER($%d)", add(f.Severity)))
+	}
+	if f.Search != "" {
+		where.WriteString(fmt.Sprintf(
+			" AND to_tsvector('simple', COALESCE(body, '')) @@ plainto_tsquery('simple', $%d)",
+			add(f.Search),
+		))
+	}
+	if f.Operation != "" {
+		where.WriteString(fmt.Sprintf(" AND attributes->>'operation' ILIKE '%' || $%d || '%%'", add(f.Operation)))
+	}
+	if f.HasError {
+		where.WriteString(fmt.Sprintf(" AND (severity_text ILIKE '%%ERROR%%' OR severity_text ILIKE '%%FATAL%%')"))
+	}
+	if f.HasTrace {
+		where.WriteString(" AND trace_id IS NOT NULL AND trace_id != ''")
+	}
+	for _, af := range f.AttrFilters {
+		if af.Key == "" {
+			continue
+		}
+		key := add(af.Key)
+		if af.Invert {
+			if af.Value != "" {
+				where.WriteString(fmt.Sprintf(" AND NOT (attributes->>$%d = $%d)", key, add(af.Value)))
+			} else {
+				where.WriteString(fmt.Sprintf(" AND (attributes->>$%d IS NULL OR attributes->>$%d = 'null')", key, key))
+			}
+		} else {
+			if af.Value != "" {
+				where.WriteString(fmt.Sprintf(" AND attributes->>$%d = $%d", key, add(af.Value)))
+			} else {
+				where.WriteString(fmt.Sprintf(" AND attributes->>$%d IS NOT NULL AND attributes->>$%d != 'null'", key, key))
+			}
+		}
+	}
+	where.WriteString(fmt.Sprintf(" AND timestamp >= $%d", add(f.From)))
+	where.WriteString(fmt.Sprintf(" AND timestamp <= $%d", add(f.To)))
+
+	q := fmt.Sprintf(`
 		SELECT timestamp, severity_number, severity_text, body, service_name,
 		       trace_id, span_id, COALESCE(attributes, '{}') AS attributes
 		FROM logs
-		WHERE ($1 = '' OR service_name = $1)
-		  AND ($2 = '' OR UPPER(severity_text) = UPPER($2))
-		  AND ($3 = '' OR body ILIKE '%' || $3 || '%')
-		  AND timestamp >= $4
-		  AND timestamp <= $5
+		WHERE 1=1%s
 		ORDER BY timestamp DESC
-		LIMIT $6`
+		LIMIT $%d`, where.String(), add(f.Limit))
 
 	type row struct {
 		QueryLog
@@ -336,8 +515,11 @@ func (c *Client) QueryLogs(ctx context.Context, f LogFilter) ([]QueryLog, error)
 	}
 
 	var rows []row
-	if err := c.db.SelectContext(ctx, &rows, q, f.Service, f.Severity, f.Search, f.From, f.To, f.Limit); err != nil {
+	if err := c.db.SelectContext(ctx, &rows, q, args...); err != nil {
 		return nil, err
+	}
+	if rows == nil {
+		rows = []row{}
 	}
 
 	result := make([]QueryLog, len(rows))
@@ -378,27 +560,32 @@ func (c *Client) QueryLogsByTraceID(ctx context.Context, traceID string) ([]Quer
 }
 
 func (c *Client) ListServices(ctx context.Context) ([]string, error) {
-	const q = `
-		SELECT DISTINCT service_name FROM (
-			SELECT service_name FROM traces
-			UNION ALL SELECT service_name FROM metrics
-			UNION ALL SELECT service_name FROM logs
-		) s ORDER BY service_name`
-
-	var result []string
-	err := c.db.SelectContext(ctx, &result, q)
-	if err != nil {
-		return nil, err
+	seen := make(map[string]struct{})
+	for _, tbl := range []string{"traces", "metrics", "logs"} {
+		var svcs []string
+		q := "SELECT DISTINCT service_name FROM " + tbl + " WHERE service_name != '' ORDER BY service_name"
+		if err := c.db.SelectContext(ctx, &svcs, q); err != nil {
+			return nil, err
+		}
+		for _, s := range svcs {
+			seen[s] = struct{}{}
+		}
 	}
-	if result == nil {
-		result = []string{}
+	result := make([]string, 0, len(seen))
+	for s := range seen {
+		result = append(result, s)
 	}
+	sort.Strings(result)
 	return result, nil
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-func scanSpans(rows interface{ StructScan(any) error; Next() bool; Err() error }) ([]QuerySpan, error) {
+func scanSpans(rows interface {
+	StructScan(any) error
+	Next() bool
+	Err() error
+}) ([]QuerySpan, error) {
 	type spanScan struct {
 		TraceID      string    `db:"trace_id"`
 		SpanID       string    `db:"span_id"`
