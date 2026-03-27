@@ -15,6 +15,7 @@
           density="compact"
           color="primary"
           height="44"
+          class="gap-tabs"
           @update:model-value="navigate"
         >
           <v-tab
@@ -178,3 +179,7 @@ onMounted(async () => {
   setInterval(() => refreshKey.value++, 30_000);
 });
 </script>
+
+<style>
+.gap-tabs .v-tab { margin-right: 2px; }
+</style>

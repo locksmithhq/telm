@@ -85,6 +85,7 @@ publish: ## Build multi-arch and push to Docker Hub (booscaaa/telm-all-in-one)
 		--platform linux/amd64,linux/arm64 \
 		--file docker/Dockerfile \
 		--tag $(HUB_IMAGE):$(HUB_TAG) \
+		--no-cache \
 		--push \
 		.
 	@echo "$(GREEN)Published: $(HUB_IMAGE):$(HUB_TAG)$(NC)"

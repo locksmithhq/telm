@@ -27,6 +27,7 @@ RUN apk add --no-cache curl && \
 FROM alpine:3.20
 RUN apk add --no-cache \
     postgresql16 \
+    postgresql16-contrib \
     supervisor \
     ca-certificates \
     tzdata \

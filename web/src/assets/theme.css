@@ -63,3 +63,13 @@
   /* misc */
   --telm-sev-label-opacity: 1;
 }
+
+/* ── Panel Editor Dialog ────────────────────────────────────────────────────── */
+.v-dialog.editor-dialog .v-overlay__content,
+.v-dialog.editor-dialog .v-overlay__scrim {
+  background: rgb(var(--v-theme-surface)) !important;
+}
+
+.v-dialog.editor-dialog .v-overlay__content > div {
+  background: rgb(var(--v-theme-surface));
+}

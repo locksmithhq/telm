@@ -51,6 +51,30 @@ Send telemetry from your services to `localhost:4317` (gRPC) or `localhost:4318`
 | `POSTGRES_DB` | `telm` | PostgreSQL database |
 | `HTTP_PORT` | `8080` | Internal HTTP port (web UI + REST API) |
 
+### Docker Compose (single service)
+
+Create a `compose.yml` and run `docker compose up -d`:
+
+```yaml
+services:
+  telm:
+    image: booscaaa/telm-all-in-one
+    restart: unless-stopped
+    ports:
+      - "4000:8080"   # Web UI + REST API
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    volumes:
+      - telm-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_PASSWORD: telm123
+
+volumes:
+  telm-data:
+```
+
+Open **http://localhost:4000** — done.
+
 ### Docker Compose (development)
 
 ```bash
