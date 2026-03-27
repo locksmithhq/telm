@@ -54,8 +54,8 @@ import * as echarts from 'echarts'
 import { parse, execute, fmtLabel, bucketSecs } from './tql.js'
 
 const props = defineProps({
-  query:  { type: String,  default: '' },
-  height: { type: Number,  default: 200 },
+  query:     { type: String, default: '' },
+  dashRange: { type: String, default: null },
 })
 
 const isDark      = inject('isDark')
@@ -75,13 +75,13 @@ const tableHeight = computed(() => '100%')
 function ct() {
   const dark = isDark.value
   return {
-    axis:       dark ? '#94a3b8' : '#64748b',
+    axis:       dark ? '#94a3b8' : '#475569',
     axisDim:    dark ? '#64748b' : '#94a3b8',
     grid:       dark ? '#1e2d45' : '#e2e8f0',
     tooltipBg:  dark ? '#1a2235' : '#ffffff',
     tooltipBdr: dark ? '#2d3f5c' : '#cbd5e1',
     tooltipTxt: dark ? '#cbd5e1' : '#0f172a',
-    bg:         dark ? '#090e1a' : '#f1f5f9',
+    bg:         'transparent',
   }
 }
 
@@ -114,16 +114,87 @@ function mkLine(name, data, color, area = false) {
 }
 function timeLabels(data, range) { return data.map(p => fmtLabel(p.time, range)) }
 
+// ─── Metric value formatter ───────────────────────────────────────────────
+// Detects unit from metric name and formats accordingly.
+// kind='gauge'     → raw value (bytes, ratio, count)
+// kind='sum|histo' → rate value already divided by bucket secs
+function fmtMetricVal(val, metricName = '', kind = 'gauge') {
+  if (val == null || isNaN(val)) return '–'
+  const n = (metricName || '').toLowerCase()
+
+  const isBytes = /mem(ory)?|heap|alloc|stack|rss|vms|buf|bytes?/.test(n)
+  const isCpu   = /\bcpu\b|processor/.test(n)
+  const isDur   = /duration|latency|elapsed|pause/.test(n)
+
+  // Gauge memory → format as B / KB / MB / GB
+  if (isBytes && kind === 'gauge') {
+    if (val >= 1073741824) return (val / 1073741824).toFixed(2) + ' GB'
+    if (val >= 1048576)    return (val / 1048576).toFixed(2)    + ' MB'
+    if (val >= 1024)       return (val / 1024).toFixed(2)       + ' KB'
+    return val.toFixed(0) + ' B'
+  }
+
+  // Sum memory rate → bytes/s
+  if (isBytes && kind !== 'gauge') {
+    if (val >= 1048576) return (val / 1048576).toFixed(2) + ' MB/s'
+    if (val >= 1024)    return (val / 1024).toFixed(2)    + ' KB/s'
+    return val.toFixed(2) + ' B/s'
+  }
+
+  // CPU gauge (ratio 0-1 or fraction of cores)
+  if (isCpu && kind === 'gauge') {
+    if (val <= 1.5) return (val * 100).toFixed(1) + '%'
+    return val.toFixed(3) + ' cores'
+  }
+
+  // CPU rate (seconds-used/second = fraction of cores)
+  if (isCpu && kind !== 'gauge') {
+    return (val * 100).toFixed(1) + '%'
+  }
+
+  // Duration gauge in nanoseconds
+  if (isDur && kind === 'gauge') {
+    if (val >= 1e9) return (val / 1e9).toFixed(3)  + ' s'
+    if (val >= 1e6) return (val / 1e6).toFixed(2)  + ' ms'
+    if (val >= 1e3) return (val / 1e3).toFixed(2)  + ' μs'
+    return val.toFixed(0) + ' ns'
+  }
+
+  // Generic: compact number
+  if (Math.abs(val) >= 1e9) return (val / 1e9).toFixed(2) + 'B'
+  if (Math.abs(val) >= 1e6) return (val / 1e6).toFixed(2) + 'M'
+  if (Math.abs(val) >= 1e3) return (val / 1e3).toFixed(2) + 'K'
+  return val % 1 === 0 ? val.toString() : val.toFixed(4)
+}
+
+// Detect metric kind from first data point
+function metricKind(data) {
+  if (!data?.length) return 'gauge'
+  const p = data[0]
+  // avg_value is non-null only for gauge metrics (value_double/value_int).
+  // Histograms/sums store data exclusively in metric_sum/metric_count (value_double is NULL).
+  if (p.avg_value != null) return 'gauge'
+  if (p.total_count != null && p.total_count > 0) return 'histogram'
+  if (p.total_sum != null) return 'sum'
+  return 'gauge'
+}
+
 // Last value of a timeseries-like dataset
 function lastVal(data, returns) {
   if (!data?.length) return null
   const last = data[data.length - 1]
   if (returns === 'timeseries') {
-    const bs = bucketSecs(result.value?.range)
-    if (last.total_sum != null) return +(last.total_sum / bs).toFixed(4)
-    return last.avg_value ?? last.total_count ?? 0
+    const bs   = bucketSecs(result.value?.range)
+    const kind = metricKind(data)
+    if (kind === 'histogram') return +(last.total_count / bs).toFixed(4)
+    if (kind === 'sum')       return +(last.total_sum   / bs).toFixed(4)
+    return last.avg_value ?? 0
   }
-  if (returns === 'throughput') return +(last.count / bucketSecs(result.value?.range)).toFixed(3)
+  if (returns === 'throughput') {
+    const rangeSecs = { '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800 }[result.value?.range] || 3600
+    const total = data.reduce((s, d) => s + (d.count || 0), 0)
+    return +(total / rangeSecs * 60).toFixed(1) // req/min, igual ao DashboardView
+  }
   if (returns === 'errors')     return last.total > 0 ? +(last.errors / last.total * 100).toFixed(2) : 0
   return null
 }
@@ -133,60 +204,66 @@ function buildOption() {
   const { data, returns, viz, range } = result.value
   const showArea = viz === 'area'
   const lbls     = timeLabels(data, range)
+  const c = ct()
 
   // ── Timeseries (metrics.series) ──────────────────────────────────────
   if (returns === 'timeseries') {
-    const bs     = bucketSecs(range)
-    const isRate = data.length > 0 && data[0].total_sum != null
-    const yLabel = isRate ? '/s' : ''
-    const vals   = data.map(p => {
-      if (isRate) return +(p.total_sum / bs).toFixed(4)
-      if (p.avg_value != null) return +p.avg_value.toFixed(4)
+    const bs       = bucketSecs(range)
+    const kind     = metricKind(data)
+    const isRate   = kind === 'histogram' || kind === 'sum'
+    const mName    = result.value?.metricName || ''
+    const fmt      = v => fmtMetricVal(v, mName, isRate ? 'sum' : 'gauge')
+    const vals     = data.map(p => {
+      if (kind === 'histogram') return +(p.total_count / bs).toFixed(4)
+      if (kind === 'sum')       return +(p.total_sum   / bs).toFixed(4)
+      if (p.avg_value != null)  return +p.avg_value.toFixed(4)
       return p.total_count || 0
     })
-    const rateFmt = isRate ? { formatter: p => `${p[0].name}<br/><b>${p[0].value} /s</b>` } : {}
+    const yAxis    = { ...yVal(), axisLabel: { ...yVal().axisLabel, formatter: fmt } }
+    const ttFmt    = { formatter: p => `${p[0].name}<br/><b>${fmt(p[0].value)}</b>` }
     if (viz === 'scatter') return {
-      backgroundColor: 'transparent', grid: baseGrid(),
-      xAxis: xCat(lbls), yAxis: yVal(yLabel),
-      tooltip: { ...tooltip(), ...rateFmt },
+      backgroundColor: c.bg, grid: baseGrid(),
+      xAxis: xCat(lbls), yAxis,
+      tooltip: { ...tooltip(), ...ttFmt },
       series: [{ type: 'scatter', data: vals, symbolSize: 5, itemStyle: { color: '#6366f1' } }],
     }
-    if (viz === 'gauge') return buildGauge(lastVal(data, returns), '#6366f1', yLabel)
+    if (viz === 'gauge') return buildGauge(lastVal(data, returns), '#6366f1', fmt(lastVal(data, returns)))
     if (viz === 'bar') return {
-      backgroundColor: 'transparent', grid: baseGrid(),
-      xAxis: xCat(lbls), yAxis: yVal(yLabel),
-      tooltip: { ...tooltip(), ...rateFmt },
+      backgroundColor: c.bg, grid: baseGrid(),
+      xAxis: xCat(lbls), yAxis,
+      tooltip: { ...tooltip(), ...ttFmt },
       series: [{ type: 'bar', data: vals, itemStyle: { color: '#6366f1', borderRadius: [2, 2, 0, 0] } }],
     }
     return { // line / area
-      backgroundColor: 'transparent', grid: baseGrid(),
-      xAxis: xCat(lbls), yAxis: yVal(yLabel),
-      tooltip: { ...tooltip(), ...rateFmt },
-      series: [mkLine(isRate ? '/s' : 'value', vals, '#6366f1', showArea || viz === 'line')],
+      backgroundColor: c.bg, grid: baseGrid(),
+      xAxis: xCat(lbls), yAxis,
+      tooltip: { ...tooltip(), ...ttFmt },
+      series: [mkLine(mName || 'value', vals, '#6366f1', showArea || viz === 'line')],
     }
   }
 
   // ── Throughput ───────────────────────────────────────────────────────
   if (returns === 'throughput') {
     const bs   = bucketSecs(range)
-    const vals = data.map(p => +(p.count / bs).toFixed(3))
+    const vals = data.map(p => +(p.count / bs).toFixed(3))  // req/s por bucket
+    const fmt  = p => `${p[0].name}<br/><b>${p[0].value} req/s</b>`
     if (viz === 'scatter') return {
-      backgroundColor: 'transparent', grid: baseGrid(),
+      backgroundColor: c.bg, grid: baseGrid(),
       xAxis: xCat(lbls), yAxis: yVal('req/s'),
-      tooltip: tooltip(),
+      tooltip: { ...tooltip(), formatter: fmt },
       series: [{ type: 'scatter', data: vals, symbolSize: 5, itemStyle: { color: '#6366f1' } }],
     }
     if (viz === 'gauge') return buildGauge(vals[vals.length - 1] || 0, '#6366f1', 'req/s')
     if (viz === 'bar') return {
-      backgroundColor: 'transparent', grid: baseGrid(),
+      backgroundColor: c.bg, grid: baseGrid(),
       xAxis: xCat(lbls), yAxis: yVal('req/s'),
-      tooltip: { ...tooltip(), formatter: p => `${p[0].name}<br/><b>${p[0].value} req/s</b>` },
+      tooltip: { ...tooltip(), formatter: fmt },
       series: [{ type: 'bar', data: vals, itemStyle: { color: '#6366f1', borderRadius: [2, 2, 0, 0] } }],
     }
     return {
-      backgroundColor: 'transparent', grid: baseGrid(),
+      backgroundColor: c.bg, grid: baseGrid(),
       xAxis: xCat(lbls), yAxis: yVal('req/s'),
-      tooltip: { ...tooltip(), formatter: p => `${p[0].name}<br/><b>${p[0].value} req/s</b>` },
+      tooltip: { ...tooltip(), formatter: fmt },
       series: [mkLine('req/s', vals, '#6366f1', showArea || viz === 'line')],
     }
   }
@@ -195,20 +272,20 @@ function buildOption() {
   if (returns === 'errors') {
     const pct = data.map(p => p.total > 0 ? +(p.errors / p.total * 100).toFixed(2) : 0)
     if (viz === 'scatter') return {
-      backgroundColor: 'transparent', grid: baseGrid(),
+      backgroundColor: c.bg, grid: baseGrid(),
       xAxis: xCat(lbls), yAxis: yVal('%'),
       tooltip: tooltip(),
       series: [{ type: 'scatter', data: pct, symbolSize: 5, itemStyle: { color: '#ef4444' } }],
     }
     if (viz === 'gauge') return buildGauge(pct[pct.length - 1] || 0, '#ef4444', '% error')
     if (viz === 'bar') return {
-      backgroundColor: 'transparent', grid: baseGrid(),
+      backgroundColor: c.bg, grid: baseGrid(),
       xAxis: xCat(lbls), yAxis: yVal('%'),
       tooltip: tooltip(),
       series: [{ type: 'bar', data: pct, itemStyle: { color: '#ef4444', borderRadius: [2, 2, 0, 0] } }],
     }
     return {
-      backgroundColor: 'transparent', grid: baseGrid(),
+      backgroundColor: c.bg, grid: baseGrid(),
       xAxis: xCat(lbls), yAxis: yVal('%'),
       tooltip: tooltip(),
       series: [mkLine('error %', pct, '#ef4444', showArea || viz === 'line')],
@@ -218,10 +295,10 @@ function buildOption() {
   // ── Latency ──────────────────────────────────────────────────────────
   if (returns === 'latency') {
     if (viz === 'scatter') return {
-      backgroundColor: 'transparent', grid: baseGrid(),
+      backgroundColor: c.bg, grid: baseGrid(),
       xAxis: xCat(lbls), yAxis: yVal('ms'),
       tooltip: tooltip(),
-      legend: { top: 2, right: 0, textStyle: { color: ct().axisDim, fontSize: 9 }, itemWidth: 8, itemHeight: 3 },
+      legend: { top: 2, right: 0, textStyle: { color: c.axisDim, fontSize: 9 }, itemWidth: 8, itemHeight: 3 },
       series: [
         { type: 'scatter', name: 'P50', data: data.map(p => +p.p50.toFixed(2)), symbolSize: 4, itemStyle: { color: '#10b981' } },
         { type: 'scatter', name: 'P95', data: data.map(p => +p.p95.toFixed(2)), symbolSize: 4, itemStyle: { color: '#f59e0b' } },
@@ -232,9 +309,8 @@ function buildOption() {
       const last = data[data.length - 1]
       if (!last) return null
       const maxVal = Math.ceil(last.p99 * 1.3)
-      const c = ct()
       return {
-        backgroundColor: 'transparent',
+        backgroundColor: c.bg,
         tooltip: { ...tooltip('item') },
         radar: { indicator: [{ name: 'P50', max: maxVal }, { name: 'P95', max: maxVal }, { name: 'P99', max: maxVal }], axisName: { color: c.axis, fontSize: 10 }, splitLine: { lineStyle: { color: c.grid } }, axisLine: { lineStyle: { color: c.grid } } },
         series: [{
@@ -243,9 +319,8 @@ function buildOption() {
         }],
       }
     }
-    const c = ct()
     return {
-      backgroundColor: 'transparent', grid: { ...baseGrid(), top: 24 },
+      backgroundColor: c.bg, grid: { ...baseGrid(), top: 24 },
       legend: { top: 2, right: 0, textStyle: { color: c.axisDim, fontSize: 10 }, itemWidth: 10, itemHeight: 3 },
       xAxis: xCat(lbls), yAxis: yVal('ms'),
       tooltip: tooltip(),
@@ -267,9 +342,8 @@ function buildOption() {
     if (viz === 'funnel') return buildFunnel(data.slice(0, 8).map(o => ({ name: o.operation.length > 22 ? o.operation.slice(0, 20) + '…' : o.operation, value: o.count })))
     // Default: horizontal bar
     const rev = [...data].reverse()
-    const c   = ct()
     return {
-      backgroundColor: 'transparent',
+      backgroundColor: c.bg,
       grid: { top: 4, right: 8, bottom: 4, left: 8, containLabel: true },
       legend: { bottom: 0, textStyle: { color: c.axisDim, fontSize: 10 }, itemWidth: 10, itemHeight: 10 },
       tooltip: { ...tooltip('axis'), axisPointer: { type: 'shadow' } },
@@ -289,18 +363,16 @@ function buildOption() {
     if (viz === 'treemap') return buildTreemap(items, i => SEV_COLORS[i.name] || '#64748b')
     if (viz === 'funnel')  return buildFunnel(items)
     if (viz === 'bar') {
-      const c = ct()
       return {
-        backgroundColor: 'transparent', grid: baseGrid(),
+        backgroundColor: c.bg, grid: baseGrid(),
         xAxis: xCat(data.map(s => s.severity)), yAxis: yVal('count'),
         tooltip: tooltip(),
         series: [{ type: 'bar', data: data.map(s => ({ value: s.count, itemStyle: { color: SEV_COLORS[s.severity] || '#64748b', borderRadius: [2, 2, 0, 0] } })) }],
       }
     }
     // Default: pie (donut)
-    const c = ct()
     return {
-      backgroundColor: 'transparent',
+      backgroundColor: c.bg,
       tooltip: { ...tooltip('item'), formatter: '{b}: {c} ({d}%)' },
       legend: { orient: 'vertical', right: 0, top: 'middle', textStyle: { color: c.axis, fontSize: 10 }, itemWidth: 10, itemHeight: 10 },
       series: [{
@@ -315,18 +387,17 @@ function buildOption() {
     const { nodes = [], edges = [] } = data
     const palette  = ['#6366f1', '#10b981', '#f59e0b', '#7dd3fc', '#a78bfa', '#34d399', '#fb923c', '#f472b6']
     const nodeColor = (name) => { let h = 0; for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) & 0xffff; return palette[h % palette.length] }
-    const c = ct()
 
     if (viz === 'sankey') {
       if (!edges.length) return null
       return {
-        backgroundColor: 'transparent',
+        backgroundColor: c.bg,
         tooltip: { ...tooltip('item'), formatter: p => p.dataType === 'edge' ? `${p.data.source} → ${p.data.target}<br/><b>${p.data.value} calls</b>` : p.name },
         series: [{
           type: 'sankey', layout: 'none',
           nodeGap: 20, nodeWidth: 14,
-          data: nodes.map(n => ({ name: n.service, itemStyle: { color: nodeColor(n.service) } })),
-          links: edges.map(e => ({ source: e.source, target: e.target, value: e.count || 1 })),
+          data: nodes.map(n => ({ name: n.label, itemStyle: { color: nodeColor(n.id) } })),
+          links: edges.map(e => ({ source: e.source, target: e.target, value: e.calls || 1 })),
           label: { color: c.axis, fontSize: 10 },
           lineStyle: { opacity: 0.4, curveness: 0.5 },
           emphasis: { focus: 'adjacency' },
@@ -334,18 +405,18 @@ function buildOption() {
       }
     }
     // graph (default)
-    const maxEdge = Math.max(...edges.map(e => e.count || 1), 1)
+    const maxEdge = Math.max(...edges.map(e => e.calls || 1), 1)
     return {
-      backgroundColor: 'transparent',
-      tooltip: { ...tooltip('item'), formatter: p => p.dataType === 'edge' ? `${p.data.source}→${p.data.target}<br/>${p.data.count} calls` : p.name },
+      backgroundColor: c.bg,
+      tooltip: { ...tooltip('item'), formatter: p => p.dataType === 'edge' ? `${p.data.source}→${p.data.target}<br/>${p.data.calls} calls` : p.name },
       series: [{
         type: 'graph', layout: 'force', roam: true, draggable: true,
         force: { repulsion: 140, edgeLength: [60, 160] },
         label: { show: true, position: 'bottom', fontSize: 10, color: c.axis },
         lineStyle: { color: c.grid, curveness: 0.2 },
         edgeSymbol: ['none', 'arrow'], edgeSymbolSize: 6,
-        nodes: nodes.map(n => ({ id: n.service, name: n.service, symbolSize: 22, itemStyle: { color: nodeColor(n.service) } })),
-        edges: edges.map(e => ({ source: e.source, target: e.target, count: e.count, lineStyle: { width: Math.max(1, e.count / maxEdge * 5) } })),
+        nodes: nodes.map(n => ({ id: n.id, name: n.label, symbolSize: 22, itemStyle: { color: nodeColor(n.id) } })),
+        edges: edges.map(e => ({ source: e.source, target: e.target, calls: e.calls, lineStyle: { width: Math.max(1, e.calls / maxEdge * 5) } })),
       }],
     }
   }
@@ -357,7 +428,7 @@ function buildOption() {
       const svcs = data.map(s => s.service_name)
       const errPct = data.map(s => s.total > 0 ? +(s.errors / s.total * 100).toFixed(2) : 0)
       return {
-        backgroundColor: 'transparent', grid: { ...baseGrid(), top: 24 },
+        backgroundColor: c.bg, grid: { ...baseGrid(), top: 24 },
         legend: { top: 2, right: 0, textStyle: { color: c.axisDim, fontSize: 10 }, itemWidth: 10, itemHeight: 10 },
         xAxis: xCat(svcs), yAxis: [yVal('%'), { ...yVal('ms'), position: 'right', splitLine: { show: false } }],
         tooltip: tooltip(),
@@ -368,13 +439,12 @@ function buildOption() {
       }
     }
     if (viz === 'radar') {
-      const c    = ct()
       const svcs = data.slice(0, 6)
       const maxErr = Math.max(...svcs.map(s => s.total > 0 ? s.errors / s.total * 100 : 0), 1)
       const maxRps = Math.max(...svcs.map(s => s.req_s || 0), 1)
       const maxP95 = Math.max(...svcs.map(s => s.p95_ms || 0), 1)
       return {
-        backgroundColor: 'transparent',
+        backgroundColor: c.bg,
         legend: { top: 2, right: 0, textStyle: { color: c.axisDim, fontSize: 9 }, itemWidth: 8, itemHeight: 8 },
         tooltip: tooltip('item'),
         radar: {
@@ -401,7 +471,6 @@ function buildOption() {
       // Flatten: services × metrics → last value heatmap
       const svcs    = Object.keys(data)
       const metrics = [...new Set(svcs.flatMap(s => Object.keys(data[s])))]
-      const c       = ct()
       const vals    = []
       svcs.forEach((s, si) => {
         metrics.forEach((m, mi) => {
@@ -411,7 +480,7 @@ function buildOption() {
         })
       })
       return {
-        backgroundColor: 'transparent',
+        backgroundColor: c.bg,
         grid: { top: 10, right: 10, bottom: 10, left: 10, containLabel: true },
         tooltip: { ...tooltip('item'), formatter: p => `${svcs[p.value[0]]}<br/>${metrics[p.value[1]]}<br/><b>${p.value[2]}</b>` },
         xAxis: { type: 'category', data: svcs, axisLabel: { color: c.axisDim, fontSize: 9 }, splitArea: { show: true } },
@@ -427,9 +496,8 @@ function buildOption() {
       const metricsData = data[svc]
       const palette = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#7dd3fc', '#a78bfa', '#fb923c']
       const allTimes = [...new Set(Object.values(metricsData).flatMap(pts => pts.map(p => p.time)))].sort()
-      const c = ct()
       return {
-        backgroundColor: 'transparent',
+        backgroundColor: c.bg,
         grid: { ...baseGrid(), top: 24 },
         legend: { top: 2, right: 0, textStyle: { color: c.axisDim, fontSize: 9 }, itemWidth: 8, itemHeight: 3 },
         xAxis: xCat(allTimes.map(t => fmtLabel(t, result.value.range))),
@@ -445,9 +513,8 @@ function buildOption() {
 
   // ── Traces scatter (duration vs time) ────────────────────────────────
   if (returns === 'traces' && viz === 'scatter') {
-    const c = ct()
     return {
-      backgroundColor: 'transparent', grid: baseGrid(),
+      backgroundColor: c.bg, grid: baseGrid(),
       xAxis: xCat(data.map(t => new Date(t.start_time).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }))),
       yAxis: yVal('ms'),
       tooltip: {
@@ -476,10 +543,10 @@ function buildOption() {
     }
     const svcs = Object.keys(bySvc)
     return {
-      backgroundColor: 'transparent', grid: baseGrid(),
+      backgroundColor: c.bg, grid: baseGrid(),
       xAxis: xCat(svcs), yAxis: yVal(),
       tooltip: { ...tooltip(), axisPointer: { type: 'shadow' } },
-      legend: { top: 2, right: 0, textStyle: { color: ct().axisDim, fontSize: 9 }, itemWidth: 8, itemHeight: 8 },
+      legend: { top: 2, right: 0, textStyle: { color: c.axisDim, fontSize: 9 }, itemWidth: 8, itemHeight: 8 },
       series: [
         { name: 'OK',    type: 'bar', stack: 's', data: svcs.map(s => bySvc[s].ok),  itemStyle: { color: 'rgba(16,185,129,.7)', borderRadius: [0, 0, 0, 0] } },
         { name: 'Error', type: 'bar', stack: 's', data: svcs.map(s => bySvc[s].err), itemStyle: { color: 'rgba(239,68,68,.7)',  borderRadius: [2, 2, 0, 0] } },
@@ -494,13 +561,13 @@ function buildOption() {
     for (const l of data) bySev[l.severity_text] = (bySev[l.severity_text] || 0) + 1
     const items = Object.entries(bySev).map(([sev, cnt]) => ({ name: sev, value: cnt, itemStyle: { color: SEV_COLORS[sev] || '#64748b' } }))
     if (viz === 'pie') return {
-      backgroundColor: 'transparent',
+      backgroundColor: c.bg,
       tooltip: { ...tooltip('item'), formatter: '{b}: {c} ({d}%)' },
-      legend: { orient: 'vertical', right: 0, top: 'middle', textStyle: { color: ct().axis, fontSize: 10 }, itemWidth: 10, itemHeight: 10 },
+      legend: { orient: 'vertical', right: 0, top: 'middle', textStyle: { color: c.axis, fontSize: 10 }, itemWidth: 10, itemHeight: 10 },
       series: [{ type: 'pie', radius: ['45%', '70%'], center: ['40%', '50%'], data: items, label: { show: false }, emphasis: { scale: true, scaleSize: 4 } }],
     }
     return {
-      backgroundColor: 'transparent', grid: baseGrid(),
+      backgroundColor: c.bg, grid: baseGrid(),
       xAxis: xCat(Object.keys(bySev)), yAxis: yVal('count'),
       tooltip: tooltip(),
       series: [{ type: 'bar', data: items.map(i => ({ value: i.value, itemStyle: i.itemStyle, borderRadius: [2, 2, 0, 0] })) }],
@@ -514,7 +581,7 @@ function buildOption() {
 function buildGauge(value, color, label) {
   const c = ct()
   return {
-    backgroundColor: 'transparent',
+    backgroundColor: c.bg,
     series: [{
       type: 'gauge',
       radius: '88%',
@@ -536,7 +603,7 @@ function buildGauge(value, color, label) {
 function buildTreemap(items, colorFn) {
   const c = ct()
   return {
-    backgroundColor: 'transparent',
+    backgroundColor: c.bg,
     tooltip: { ...tooltip('item'), formatter: p => `${p.name}<br/><b>${p.value}</b>` },
     series: [{
       type: 'treemap',
@@ -552,7 +619,7 @@ function buildPie(items) {
   const palette = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#7dd3fc', '#a78bfa', '#fb923c', '#f472b6', '#34d399']
   const c = ct()
   return {
-    backgroundColor: 'transparent',
+    backgroundColor: c.bg,
     tooltip: { ...tooltip('item'), formatter: '{b}: {c} ({d}%)' },
     legend: { orient: 'vertical', right: 0, top: 'middle', textStyle: { color: c.axis, fontSize: 10 }, itemWidth: 10, itemHeight: 10 },
     series: [{
@@ -568,7 +635,7 @@ function buildFunnel(items) {
   const c = ct()
   const sorted = [...items].sort((a, b) => b.value - a.value)
   return {
-    backgroundColor: 'transparent',
+    backgroundColor: c.bg,
     tooltip: { ...tooltip('item'), formatter: '{b}: {c}' },
     legend: { bottom: 0, textStyle: { color: c.axisDim, fontSize: 10 }, itemWidth: 10, itemHeight: 10 },
     series: [{
@@ -647,11 +714,21 @@ const statValue = computed(() => {
   if (!r || !r.data?.length) return '–'
   const v = lastVal(r.data, r.returns)
   if (v == null) return r.data.length
+  if (r.returns === 'timeseries') {
+    const kind  = metricKind(r.data)
+    const isRate = kind === 'histogram' || kind === 'sum'
+    return fmtMetricVal(v, r.metricName || '', isRate ? 'sum' : 'gauge')
+  }
   if (Math.abs(v) >= 1e6) return (v / 1e6).toFixed(2) + 'M'
   if (Math.abs(v) >= 1e3) return (v / 1e3).toFixed(2) + 'K'
   return Number(v).toFixed(v % 1 === 0 ? 0 : 2)
 })
-const statLabel = computed(() => result.value?.returns || '')
+const statLabel = computed(() => {
+  const r = result.value
+  if (!r) return ''
+  if (r.returns === 'throughput') return 'req / min'
+  return r.returns
+})
 
 // ─── Run query ────────────────────────────────────────────────────────────
 async function run() {
@@ -659,6 +736,8 @@ async function run() {
   if (!q) { result.value = null; initialized.value = false; error.value = ''; empty.value = false; return }
   const parsed = parse(q)
   if (parsed.error) { error.value = parsed.error; result.value = null; initialized.value = false; return }
+  // Dashboard-level range overrides the panel's embedded range
+  if (props.dashRange) parsed.params.range = props.dashRange
   // Keep old result visible while fetching so the chart stays mounted and
   // the ECharts instance is preserved — prevents animation replay on refresh
   loading.value = true; error.value = ''
@@ -704,7 +783,8 @@ watch(canvasEl, (el) => {
   }
 })
 
-watch(() => props.query, run)
+watch(() => props.query,     run)
+watch(() => props.dashRange, run)
 watch(refreshKey, run)
 watch(isDark, () => { chart?.dispose(); chart = null; if (result.value && !['stat','table'].includes(result.value.viz)) nextTick(() => renderChart(false)) })
 onMounted(run)
@@ -712,7 +792,7 @@ onUnmounted(() => { resizeObserver?.disconnect(); chart?.dispose() })
 </script>
 
 <style scoped>
-.viz-wrap       { width: 100%; height: 100%; }
-.viz-canvas     { width: 100%; height: 100%; }
-.viz-table-wrap { width: 100%; height: 100%; overflow: auto; }
+.viz-wrap       { width: 100%; height: 100%; background: var(--telm-bg-row); }
+.viz-canvas     { width: 100%; height: 100%; background: var(--telm-bg-row); }
+.viz-table-wrap { width: 100%; height: 100%; overflow: auto; background: var(--telm-bg-row); }
 </style>

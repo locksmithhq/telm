@@ -18,7 +18,7 @@
 
     <!-- Visualization -->
     <div class="panel-viz">
-      <PanelViz :query="panel.query" />
+      <PanelViz :query="panel.query" :dash-range="dashRange" />
     </div>
   </v-card>
 </template>
@@ -29,7 +29,8 @@ import { parse, SOURCES } from './tql.js'
 import PanelViz from './PanelViz.vue'
 
 const props = defineProps({
-  panel: { type: Object, required: true },
+  panel:     { type: Object, required: true },
+  dashRange: { type: String, default: null },
 })
 defineEmits(['edit', 'remove'])
 
@@ -47,13 +48,14 @@ const sourceLabel = computed(() => {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  background: var(--telm-bg-row) !important;
 }
 
 .panel-header {
   display: flex;
   align-items: center;
   padding: 6px 8px;
-  border-bottom: 1px solid rgba(255,255,255,0.05);
+  border-bottom: 1px solid var(--telm-border-light);
   flex-shrink: 0;
   gap: 2px;
 }
