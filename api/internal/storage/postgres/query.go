@@ -381,13 +381,54 @@ func (c *Client) QueryMetrics(ctx context.Context, f MetricFilter) ([]QueryMetri
 }
 
 func (c *Client) QueryMetricCatalog(ctx context.Context, service string) ([]MetricCatalogEntry, error) {
+	// Para métricas sum/histogram com temporality cumulativa (=2), cada label set
+	// (combinação de atributos) tem seu próprio contador acumulado. Calculamos o
+	// delta por label set (último - penúltimo) e somamos todos os label sets para
+	// obter o total de eventos no último intervalo de export.
 	const q = `
-		SELECT DISTINCT ON (metric_name, service_name)
-		       metric_name, metric_type, service_name,
-		       unit, value_double, value_int, metric_count, metric_sum, timestamp
-		FROM metrics
-		WHERE ($1 = '' OR service_name = $1)
-		ORDER BY metric_name, service_name, timestamp DESC`
+		WITH ranked AS (
+		    SELECT metric_name, metric_type, service_name, unit, timestamp,
+		           aggregation_temporality, attributes,
+		           value_double, value_int, metric_count, metric_sum,
+		           ROW_NUMBER() OVER (PARTITION BY metric_name, service_name, attributes ORDER BY timestamp DESC) AS rn,
+		           LAG(value_double) OVER (PARTITION BY metric_name, service_name, attributes ORDER BY timestamp) AS prev_double,
+		           LAG(value_int)    OVER (PARTITION BY metric_name, service_name, attributes ORDER BY timestamp) AS prev_int,
+		           LAG(metric_count) OVER (PARTITION BY metric_name, service_name, attributes ORDER BY timestamp) AS prev_count,
+		           LAG(metric_sum)   OVER (PARTITION BY metric_name, service_name, attributes ORDER BY timestamp) AS prev_sum
+		    FROM metrics
+		    WHERE ($1 = '' OR service_name = $1)
+		),
+		latest AS (
+		    SELECT * FROM ranked WHERE rn = 1
+		)
+		SELECT metric_name, metric_type, service_name, unit,
+		       MAX(timestamp) AS timestamp,
+		       CASE WHEN MAX(aggregation_temporality) IS NULL
+		            THEN AVG(value_double)
+		            WHEN MAX(aggregation_temporality) = 2
+		            THEN NULLIF(SUM(CASE WHEN value_double IS NOT NULL AND prev_double IS NOT NULL
+		                               THEN GREATEST(value_double - prev_double, 0) ELSE 0 END), 0)
+		            ELSE NULLIF(SUM(COALESCE(value_double, 0)), 0)
+		       END::float8 AS value_double,
+		       CASE WHEN MAX(aggregation_temporality) IS NULL
+		            THEN (AVG(value_int::float8))::bigint
+		            WHEN MAX(aggregation_temporality) = 2
+		            THEN NULLIF(SUM(CASE WHEN value_int IS NOT NULL AND prev_int IS NOT NULL
+		                               THEN GREATEST(value_int - prev_int, 0) ELSE 0 END), 0)
+		            ELSE NULLIF(SUM(COALESCE(value_int, 0)), 0)
+		       END::bigint AS value_int,
+		       CASE WHEN MAX(aggregation_temporality) = 2
+		            THEN NULLIF(SUM(CASE WHEN metric_count IS NOT NULL AND prev_count IS NOT NULL
+		                               THEN GREATEST(metric_count - prev_count, 0) ELSE 0 END), 0)
+		            ELSE NULLIF(SUM(COALESCE(metric_count, 0)), 0)
+		       END AS metric_count,
+		       CASE WHEN MAX(aggregation_temporality) = 2
+		            THEN NULLIF(SUM(CASE WHEN metric_sum IS NOT NULL AND prev_sum IS NOT NULL
+		                               THEN GREATEST(metric_sum - prev_sum, 0) ELSE 0 END), 0)
+		            ELSE NULLIF(SUM(COALESCE(metric_sum, 0)), 0)
+		       END AS metric_sum
+		FROM latest
+		GROUP BY metric_name, metric_type, service_name, unit`
 
 	var rows []MetricCatalogEntry
 	if err := c.db.SelectContext(ctx, &rows, q, service); err != nil {
@@ -420,14 +461,18 @@ func (c *Client) QueryMetricSeries(ctx context.Context, f MetricSeriesFilter) ([
 
 	q := fmt.Sprintf(`
 		SELECT date_trunc('%s', timestamp) AS bucket,
-		       AVG(COALESCE(value_double, value_int::float8)) AS avg_value,
+		       CASE WHEN MAX(aggregation_temporality) IS NOT NULL THEN NULL
+		            ELSE AVG(COALESCE(value_double, value_int::float8))
+		       END AS avg_value,
 		       CASE WHEN MAX(aggregation_temporality) = 2
 		            THEN GREATEST(MAX(metric_count) - MIN(metric_count), 0)
 		            ELSE SUM(metric_count)
 		       END AS total_count,
 		       CASE WHEN MAX(aggregation_temporality) = 2
-		            THEN GREATEST(MAX(metric_sum) - MIN(metric_sum), 0)
-		            ELSE SUM(metric_sum)
+		            THEN GREATEST(
+		              MAX(COALESCE(metric_sum, value_double, value_int::float8)) -
+		              MIN(COALESCE(metric_sum, value_double, value_int::float8)), 0)
+		            ELSE SUM(COALESCE(metric_sum, value_double, value_int::float8))
 		       END AS total_sum
 		FROM metrics
 		WHERE metric_name = $1
