@@ -1,6 +1,6 @@
 <template>
   <v-app>
-    <v-app-bar :elevation="0" border="b" color="surface" height="44">
+    <v-app-bar v-if="!isPublic" :elevation="0" border="b" color="surface" height="44">
       <div class="d-flex align-center h-100 pl-4 gap-3">
         <span
           class="mono text-caption font-weight-bold text-primary pr-2"
@@ -54,6 +54,13 @@
           >
             <v-icon size="13" start>mdi-monitor-dashboard</v-icon>Dashboards
           </v-tab>
+          <v-tab
+            value="storage"
+            min-width="0"
+            class="px-3 text-caption font-weight-medium"
+          >
+            <v-icon size="13" start>mdi-database-outline</v-icon>Storage
+          </v-tab>
         </v-tabs>
       </div>
 
@@ -99,6 +106,15 @@
         >
           <v-icon size="16">mdi-refresh</v-icon>
         </v-btn>
+
+        <v-btn
+          icon
+          size="small"
+          variant="text"
+          @click="logout"
+        >
+          <v-icon size="16">mdi-logout-variant</v-icon>
+        </v-btn>
       </div>
     </v-app-bar>
 
@@ -121,6 +137,7 @@ import api from "@/plugins/axios";
 const router = useRouter();
 const route = useRoute();
 const theme = useTheme();
+const isPublic = computed(() => route.meta.public);
 
 const isDark = computed(() => theme.global.name.value === "dark");
 
@@ -141,6 +158,7 @@ const tabRouteMap = {
   metrics: "/metrics",
   logs: "/logs",
   dashboards: "/dashboards",
+  storage: "/storage",
 };
 const routeTabMap = Object.fromEntries(
   Object.entries(tabRouteMap).map(([k, v]) => [v, k]),
@@ -171,7 +189,14 @@ provide("refreshKey", refreshKey);
 provide("loading", loading);
 provide("isDark", isDark);
 
+async function logout() {
+  try { await api.post("/auth/logout") } catch {}
+  localStorage.removeItem("telm-auth");
+  router.push("/login");
+}
+
 onMounted(async () => {
+  if (isPublic.value) return
   try {
     const { data } = await api.get("/services");
     services.value = data || [];
