@@ -558,7 +558,7 @@ function buildOption() {
   if (returns === 'logs' && (viz === 'bar' || viz === 'pie')) {
     const SEV_COLORS = { ERROR: '#ef4444', FATAL: '#dc2626', WARN: '#f59e0b', INFO: '#6366f1', DEBUG: '#64748b', TRACE: '#475569' }
     const bySev = {}
-    for (const l of data) bySev[l.severity_text] = (bySev[l.severity_text] || 0) + 1
+    for (const l of data) bySev[l.severity] = (bySev[l.severity] || 0) + 1
     const items = Object.entries(bySev).map(([sev, cnt]) => ({ name: sev, value: cnt, itemStyle: { color: SEV_COLORS[sev] || '#64748b' } }))
     if (viz === 'pie') return {
       backgroundColor: c.bg,
@@ -662,10 +662,10 @@ const tableCols = computed(() => {
     { key: 'start_time',    label: 'Time',       fmt: r => new Date(r.start_time).toLocaleTimeString('pt-BR') },
   ]
   if (returns === 'logs') return [
-    { key: 'timestamp',     label: 'Time',    fmt: r => new Date(r.timestamp).toLocaleTimeString('pt-BR') },
-    { key: 'service_name',  label: 'Service' },
-    { key: 'severity_text', label: 'Level',   style: r => ({ ERROR:'color:#ef4444', FATAL:'color:#dc2626', WARN:'color:#f59e0b', INFO:'color:#6366f1', DEBUG:'color:#64748b' })[r.severity_text] || '' },
-    { key: 'body',          label: 'Message', fmt: r => r.body?.length > 80 ? r.body.slice(0, 78) + '…' : r.body },
+    { key: 'timestamp', label: 'Time',    fmt: r => new Date(r.timestamp).toLocaleTimeString('pt-BR') },
+    { key: 'service',   label: 'Service' },
+    { key: 'severity',  label: 'Level',   style: r => ({ ERROR:'color:#ef4444', FATAL:'color:#dc2626', WARN:'color:#f59e0b', INFO:'color:#6366f1', DEBUG:'color:#64748b' })[r.severity] || '' },
+    { key: 'body',      label: 'Message', fmt: r => r.body?.length > 80 ? r.body.slice(0, 78) + '…' : r.body },
   ]
   if (returns === 'top-ops') return [
     { key: 'operation', label: 'Operation' },
