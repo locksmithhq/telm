@@ -381,53 +381,47 @@ func (c *Client) QueryMetrics(ctx context.Context, f MetricFilter) ([]QueryMetri
 }
 
 func (c *Client) QueryMetricCatalog(ctx context.Context, service string) ([]MetricCatalogEntry, error) {
-	// Para métricas sum/histogram com temporality cumulativa (=2), cada label set
-	// (combinação de atributos) tem seu próprio contador acumulado. Calculamos o
-	// delta por label set (último - penúltimo) e somamos todos os label sets para
-	// obter o total de eventos no último intervalo de export.
+	// Lê metrics_current — uma linha por partição (metric_name + service + label set).
+	// prev_* já está pré-calculado no write path (upsertCurrentMetric).
+	// Big-O: O(D) onde D = partições distintas. Sem window functions, sem subqueries.
 	const q = `
-		WITH ranked AS (
-		    SELECT metric_name, metric_type, service_name, unit, timestamp,
-		           aggregation_temporality, attributes,
-		           value_double, value_int, metric_count, metric_sum,
-		           ROW_NUMBER() OVER (PARTITION BY metric_name, service_name, attributes ORDER BY timestamp DESC) AS rn,
-		           LAG(value_double) OVER (PARTITION BY metric_name, service_name, attributes ORDER BY timestamp) AS prev_double,
-		           LAG(value_int)    OVER (PARTITION BY metric_name, service_name, attributes ORDER BY timestamp) AS prev_int,
-		           LAG(metric_count) OVER (PARTITION BY metric_name, service_name, attributes ORDER BY timestamp) AS prev_count,
-		           LAG(metric_sum)   OVER (PARTITION BY metric_name, service_name, attributes ORDER BY timestamp) AS prev_sum
-		    FROM metrics
-		    WHERE ($1 = '' OR service_name = $1)
-		),
-		latest AS (
-		    SELECT * FROM ranked WHERE rn = 1
-		)
-		SELECT metric_name, metric_type, service_name, unit,
-		       MAX(timestamp) AS timestamp,
-		       CASE WHEN MAX(aggregation_temporality) IS NULL
+		SELECT
+		    metric_name, metric_type, service_name, unit,
+		    MAX(timestamp) AS timestamp,
+		    CASE
+		        WHEN MAX(aggregation_temporality) IS NULL
 		            THEN AVG(value_double)
-		            WHEN MAX(aggregation_temporality) = 2
-		            THEN NULLIF(SUM(CASE WHEN value_double IS NOT NULL AND prev_double IS NOT NULL
-		                               THEN GREATEST(value_double - prev_double, 0) ELSE 0 END), 0)
-		            ELSE NULLIF(SUM(COALESCE(value_double, 0)), 0)
-		       END::float8 AS value_double,
-		       CASE WHEN MAX(aggregation_temporality) IS NULL
+		        WHEN MAX(aggregation_temporality) = 2
+		            THEN NULLIF(SUM(CASE
+		                WHEN value_double IS NOT NULL AND prev_value_double IS NOT NULL
+		                THEN GREATEST(value_double - prev_value_double, 0) ELSE 0 END), 0)
+		        ELSE NULLIF(SUM(COALESCE(value_double, 0)), 0)
+		    END::float8 AS value_double,
+		    CASE
+		        WHEN MAX(aggregation_temporality) IS NULL
 		            THEN (AVG(value_int::float8))::bigint
-		            WHEN MAX(aggregation_temporality) = 2
-		            THEN NULLIF(SUM(CASE WHEN value_int IS NOT NULL AND prev_int IS NOT NULL
-		                               THEN GREATEST(value_int - prev_int, 0) ELSE 0 END), 0)
-		            ELSE NULLIF(SUM(COALESCE(value_int, 0)), 0)
-		       END::bigint AS value_int,
-		       CASE WHEN MAX(aggregation_temporality) = 2
-		            THEN NULLIF(SUM(CASE WHEN metric_count IS NOT NULL AND prev_count IS NOT NULL
-		                               THEN GREATEST(metric_count - prev_count, 0) ELSE 0 END), 0)
-		            ELSE NULLIF(SUM(COALESCE(metric_count, 0)), 0)
-		       END AS metric_count,
-		       CASE WHEN MAX(aggregation_temporality) = 2
-		            THEN NULLIF(SUM(CASE WHEN metric_sum IS NOT NULL AND prev_sum IS NOT NULL
-		                               THEN GREATEST(metric_sum - prev_sum, 0) ELSE 0 END), 0)
-		            ELSE NULLIF(SUM(COALESCE(metric_sum, 0)), 0)
-		       END AS metric_sum
-		FROM latest
+		        WHEN MAX(aggregation_temporality) = 2
+		            THEN NULLIF(SUM(CASE
+		                WHEN value_int IS NOT NULL AND prev_value_int IS NOT NULL
+		                THEN GREATEST(value_int - prev_value_int, 0) ELSE 0 END), 0)::bigint
+		        ELSE NULLIF(SUM(COALESCE(value_int, 0)), 0)::bigint
+		    END AS value_int,
+		    CASE
+		        WHEN MAX(aggregation_temporality) = 2
+		            THEN NULLIF(SUM(CASE
+		                WHEN metric_count IS NOT NULL AND prev_metric_count IS NOT NULL
+		                THEN GREATEST(metric_count - prev_metric_count, 0) ELSE 0 END), 0)
+		        ELSE NULLIF(SUM(COALESCE(metric_count, 0)), 0)
+		    END AS metric_count,
+		    CASE
+		        WHEN MAX(aggregation_temporality) = 2
+		            THEN NULLIF(SUM(CASE
+		                WHEN metric_sum IS NOT NULL AND prev_metric_sum IS NOT NULL
+		                THEN GREATEST(metric_sum - prev_metric_sum, 0) ELSE 0 END), 0)
+		        ELSE NULLIF(SUM(COALESCE(metric_sum, 0)), 0)
+		    END AS metric_sum
+		FROM metrics_current
+		WHERE ($1 = '' OR service_name = $1)
 		GROUP BY metric_name, metric_type, service_name, unit`
 
 	var rows []MetricCatalogEntry
@@ -449,18 +443,20 @@ func (c *Client) QueryMetricSeries(ctx context.Context, f MetricSeriesFilter) ([
 	}
 
 	dur := f.To.Sub(f.From)
-	bucket := "minute"
+	var bucketExpr string
 	switch {
-	case dur > 7*24*time.Hour:
-		bucket = "hour"
-	case dur > 24*time.Hour:
-		bucket = "30 minutes"
-	case dur > 6*time.Hour:
-		bucket = "5 minutes"
+	case dur >= 7*24*time.Hour:
+		bucketExpr = "date_trunc('hour', timestamp)"
+	case dur >= 24*time.Hour:
+		bucketExpr = "to_timestamp(floor(extract(epoch from timestamp) / 1800) * 1800)"
+	case dur >= 6*time.Hour:
+		bucketExpr = "to_timestamp(floor(extract(epoch from timestamp) / 300) * 300)"
+	default:
+		bucketExpr = "date_trunc('minute', timestamp)"
 	}
 
 	q := fmt.Sprintf(`
-		SELECT date_trunc('%s', timestamp) AS bucket,
+		SELECT %s AS bucket,
 		       CASE WHEN MAX(aggregation_temporality) IS NOT NULL THEN NULL
 		            ELSE AVG(COALESCE(value_double, value_int::float8))
 		       END AS avg_value,
@@ -480,7 +476,7 @@ func (c *Client) QueryMetricSeries(ctx context.Context, f MetricSeriesFilter) ([
 		  AND timestamp >= $3
 		  AND timestamp <= $4
 		GROUP BY bucket
-		ORDER BY bucket ASC`, bucket)
+		ORDER BY bucket ASC`, bucketExpr)
 
 	var rows []MetricSeriesPoint
 	if err := c.db.SelectContext(ctx, &rows, q, f.Name, f.Service, f.From, f.To); err != nil {
