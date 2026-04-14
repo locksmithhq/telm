@@ -10,6 +10,11 @@ export POSTGRES_DB="${POSTGRES_DB:-telm}"
 export SSL_MODE="${SSL_MODE:-disable}"
 export HTTP_PORT="${HTTP_PORT:-8080}"
 export GRPC_PORT="${GRPC_PORT:-9317}"
+export JWT_SECRET="${JWT_SECRET:-}"
+export ADMIN_EMAIL="${ADMIN_EMAIL:-}"
+export ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
+export HTTPS="${HTTPS:-false}"
+export CORS_ORIGIN="${CORS_ORIGIN:-}"
 
 # ── PostgreSQL init ───────────────────────────────────────────────────────────
 if [ ! -f "$PGDATA/PG_VERSION" ]; then
