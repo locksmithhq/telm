@@ -24,11 +24,10 @@ CREATE TABLE IF NOT EXISTS traces (
 	status_code         SMALLINT     NOT NULL DEFAULT 0,
 	status_message      TEXT,
 	kind                SMALLINT     NOT NULL DEFAULT 0,
-	attributes          TEXT,
-	resource_attributes TEXT,
-	events              TEXT,
-	links               TEXT,
-	created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+	attributes TEXT,
+	events      TEXT,
+	links       TEXT,
+	created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_traces_trace_id   ON traces(trace_id);
 CREATE INDEX IF NOT EXISTS idx_traces_service    ON traces(service_name);
@@ -53,9 +52,7 @@ CREATE TABLE IF NOT EXISTS metrics (
 	metric_count            BIGINT,
 	metric_sum              DOUBLE PRECISION,
 	attributes              TEXT,
-	resource_attributes     TEXT,
 	unit                    TEXT,
-	description             TEXT,
 	is_monotonic            BOOLEAN,
 	aggregation_temporality SMALLINT,
 	bucket_counts           TEXT,
@@ -67,6 +64,7 @@ CREATE INDEX IF NOT EXISTS idx_metrics_service       ON metrics(service_name);
 CREATE INDEX IF NOT EXISTS idx_metrics_timestamp     ON metrics(timestamp);
 CREATE INDEX IF NOT EXISTS idx_metrics_name_svc_time ON metrics(metric_name, service_name, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_metrics_svc_time      ON metrics(service_name, timestamp DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_metrics_upsert_key ON metrics(metric_name, service_name, timestamp, md5(coalesce(attributes, '{}')));
 
 CREATE TABLE IF NOT EXISTS logs (
 	id                  BIGSERIAL PRIMARY KEY,
@@ -78,9 +76,8 @@ CREATE TABLE IF NOT EXISTS logs (
 	severity_text       TEXT,
 	body                TEXT,
 	service_name        TEXT        NOT NULL,
-	attributes          TEXT,
-	resource_attributes TEXT,
-	created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	attributes TEXT,
+	created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_logs_service       ON logs(service_name);
 CREATE INDEX IF NOT EXISTS idx_logs_timestamp     ON logs(timestamp);
@@ -98,6 +95,21 @@ CREATE TABLE IF NOT EXISTS dashboards (
 	updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_dashboards_created ON dashboards(created_at);
+
+CREATE TABLE IF NOT EXISTS users (
+	id         BIGSERIAL    PRIMARY KEY,
+	email      TEXT         NOT NULL UNIQUE,
+	password   TEXT         NOT NULL,
+	created_at TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+	id           BIGSERIAL    PRIMARY KEY,
+	name         TEXT         NOT NULL,
+	key_hash     TEXT         NOT NULL UNIQUE,
+	created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+	last_used_at TIMESTAMPTZ
+);
 `
 
 type Client struct {
@@ -123,8 +135,39 @@ func New(dsn string) (*Client, error) {
 	return c, nil
 }
 
+// dropOrphanCols remove colunas que pararam de ser usadas.
+// Usa IF EXISTS para ser idempotente em bancos já migrados ou recém-criados.
+const dropOrphanCols = `
+ALTER TABLE traces  DROP COLUMN IF EXISTS resource_attributes;
+ALTER TABLE metrics DROP COLUMN IF EXISTS resource_attributes;
+ALTER TABLE metrics DROP COLUMN IF EXISTS description;
+ALTER TABLE logs    DROP COLUMN IF EXISTS resource_attributes;
+`
+
+// deduplicateMetrics removes duplicate metric rows before the unique index is created.
+// Keeps the latest row (highest id) per (metric_name, service_name, minute_bucket, attributes).
+// Safe to run repeatedly — no-op when no duplicates exist.
+const deduplicateMetrics = `
+DELETE FROM metrics a
+USING (
+	SELECT id,
+	       ROW_NUMBER() OVER (
+	           PARTITION BY metric_name, service_name, date_trunc('minute', timestamp), md5(coalesce(attributes, '{}'))
+	           ORDER BY id DESC
+	       ) AS rn
+	FROM metrics
+) b
+WHERE a.id = b.id AND b.rn > 1
+`
+
 func (c *Client) migrate() error {
-	_, err := c.db.ExecContext(context.Background(), schema)
+	if _, err := c.db.ExecContext(context.Background(), schema); err != nil {
+		return err
+	}
+	if _, err := c.db.ExecContext(context.Background(), deduplicateMetrics); err != nil {
+		return fmt.Errorf("deduplicate metrics: %w", err)
+	}
+	_, err := c.db.ExecContext(context.Background(), dropOrphanCols)
 	return err
 }
 
