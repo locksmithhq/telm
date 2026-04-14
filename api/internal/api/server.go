@@ -5,9 +5,10 @@ import (
 )
 
 type Server struct {
-	store *postgres.Client
+	store     *postgres.Client
+	jwtSecret []byte
 }
 
-func NewServer(store *postgres.Client) *Server {
-	return &Server{store: store}
+func NewServer(store *postgres.Client, jwtSecret []byte) *Server {
+	return &Server{store: store, jwtSecret: jwtSecret}
 }
