@@ -8,6 +8,7 @@ import (
 
 	"github.com/locksmithhq/telm/internal/adapter/database"
 	"github.com/locksmithhq/telm/internal/adapter/rest"
+	"github.com/locksmithhq/telm/internal/api"
 	"github.com/locksmithhq/telm/internal/receiver"
 	"github.com/locksmithhq/telm/internal/storage/postgres"
 
@@ -17,8 +18,20 @@ import (
 var serveCmd = &cobra.Command{
 	Use: "serve",
 	Run: func(cmd *cobra.Command, args []string) {
+		jwtSecret := getEnv("JWT_SECRET", "")
+		if jwtSecret == "" {
+			slog.Error("JWT_SECRET env var is required")
+			os.Exit(1)
+		}
+		if len(jwtSecret) < 32 || jwtSecret == "change-me-use-openssl-rand-base64-32" {
+			slog.Error("JWT_SECRET inseguro: deve ter pelo menos 32 caracteres e não pode ser o valor padrão")
+			os.Exit(1)
+		}
+
 		store := database.Initialize()
 		defer store.Close()
+
+		seedAdmin(store)
 
 		grpcPort := getEnv("GRPC_PORT", "9317")
 		grpcSrv := receiver.NewServer(store)
@@ -31,35 +44,64 @@ var serveCmd = &cobra.Command{
 		startCleanupCron(store)
 
 		// Inicia HTTP (blocking)
-		rest.Initialize(store)
+		rest.Initialize(store, []byte(jwtSecret))
 	},
 }
 
-// startCleanupCron dispara uma goroutine que roda CleanupLogs todo dia às 03:00.
-// O VACUUM FULL reescreve a tabela de logs e devolve espaço físico ao OS.
+func seedAdmin(store *postgres.Client) {
+	email := os.Getenv("ADMIN_EMAIL")
+	password := os.Getenv("ADMIN_PASSWORD")
+	if email == "" || password == "" {
+		slog.Warn("ADMIN_EMAIL/ADMIN_PASSWORD not set — skipping admin seed")
+		return
+	}
+	hash, err := api.HashPassword(password)
+	if err != nil {
+		slog.Error("failed to hash admin password", "error", err)
+		os.Exit(1)
+	}
+	if err := store.UpsertAdminUser(context.Background(), email, hash); err != nil {
+		slog.Error("failed to seed admin user", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("admin user ready")
+}
+
+// startCleanupCron dispara uma goroutine que roda os cleanups todo dia às 03:00.
+// O VACUUM FULL reescreve cada tabela e devolve espaço físico ao OS.
 func startCleanupCron(store *postgres.Client) {
 	go func() {
 		for {
 			next := nextDailyRun(3)
-			slog.Info("log cleanup agendado",
-				"retention_days", postgres.LogRetentionDays,
+			slog.Info("cleanup agendado",
 				"next_run", next.Format(time.RFC3339),
+				"log_retention_days", postgres.LogRetentionDays,
+				"trace_retention_days", postgres.TraceRetentionDays,
+				"metric_retention_days", postgres.MetricRetentionDays,
 			)
 			time.Sleep(time.Until(next))
 
-			// Timeout generoso: VACUUM FULL em tabelas grandes pode levar minutos.
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
-			deleted, err := store.CleanupLogs(ctx)
-			cancel()
 
-			if err != nil {
-				slog.Error("log cleanup falhou", "error", err, "deleted", deleted)
+			if deleted, err := store.CleanupLogs(ctx); err != nil {
+				slog.Error("log cleanup falhou", "error", err)
 			} else {
-				slog.Info("log cleanup concluído",
-					"deleted_rows", deleted,
-					"retention_days", postgres.LogRetentionDays,
-				)
+				slog.Info("log cleanup concluído", "deleted_rows", deleted)
 			}
+
+			if deleted, err := store.CleanupTraces(ctx); err != nil {
+				slog.Error("trace cleanup falhou", "error", err)
+			} else {
+				slog.Info("trace cleanup concluído", "deleted_rows", deleted)
+			}
+
+			if deleted, err := store.CleanupMetrics(ctx); err != nil {
+				slog.Error("metric cleanup falhou", "error", err)
+			} else {
+				slog.Info("metric cleanup concluído", "deleted_rows", deleted)
+			}
+
+			cancel()
 		}
 	}()
 }
