@@ -46,6 +46,38 @@ DO UPDATE SET
 	bucket_counts           = EXCLUDED.bucket_counts,
 	explicit_bounds         = EXCLUDED.explicit_bounds`
 
+// upsertCurrentMetric mantém metrics_current com o estado mais recente de cada
+// série (metric_name + service_name + label set). Em conflito:
+//   - prev_* recebe o snapshot anterior (para cálculo de delta no catálogo)
+//   - campos atuais são substituídos pelo novo valor
+// WHERE garante que dados fora de ordem (timestamp <= atual) são ignorados.
+const upsertCurrentMetric = `
+INSERT INTO metrics_current (
+	metric_name, metric_type, service_name, attributes, unit, aggregation_temporality,
+	timestamp, value_double, value_int, metric_count, metric_sum,
+	prev_timestamp, prev_value_double, prev_value_int, prev_metric_count, prev_metric_sum
+) VALUES (
+	:metric_name, :metric_type, :service_name, :attributes, :unit, :aggregation_temporality,
+	:timestamp, :value_double, :value_int, :metric_count, :metric_sum,
+	NULL, NULL, NULL, NULL, NULL
+)
+ON CONFLICT (metric_name, service_name, md5(coalesce(attributes, '{}')))
+DO UPDATE SET
+	metric_type             = EXCLUDED.metric_type,
+	unit                    = EXCLUDED.unit,
+	aggregation_temporality = EXCLUDED.aggregation_temporality,
+	prev_timestamp          = metrics_current.timestamp,
+	prev_value_double       = metrics_current.value_double,
+	prev_value_int          = metrics_current.value_int,
+	prev_metric_count       = metrics_current.metric_count,
+	prev_metric_sum         = metrics_current.metric_sum,
+	timestamp               = EXCLUDED.timestamp,
+	value_double            = EXCLUDED.value_double,
+	value_int               = EXCLUDED.value_int,
+	metric_count            = EXCLUDED.metric_count,
+	metric_sum              = EXCLUDED.metric_sum
+WHERE EXCLUDED.timestamp > metrics_current.timestamp`
+
 func (c *Client) SaveMetrics(ctx context.Context, points []storage.MetricPoint) error {
 	if len(points) == 0 {
 		return nil
@@ -61,6 +93,9 @@ func (c *Client) SaveMetrics(ctx context.Context, points []storage.MetricPoint) 
 		row := toMetricRow(p)
 		if _, err := tx.NamedExecContext(ctx, insertMetric, row); err != nil {
 			return fmt.Errorf("insert metric %s: %w", p.Name, err)
+		}
+		if _, err := tx.NamedExecContext(ctx, upsertCurrentMetric, row); err != nil {
+			return fmt.Errorf("upsert current metric %s: %w", p.Name, err)
 		}
 	}
 

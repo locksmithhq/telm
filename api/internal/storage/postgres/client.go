@@ -66,6 +66,36 @@ CREATE INDEX IF NOT EXISTS idx_metrics_name_svc_time ON metrics(metric_name, ser
 CREATE INDEX IF NOT EXISTS idx_metrics_svc_time      ON metrics(service_name, timestamp DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_metrics_upsert_key ON metrics(metric_name, service_name, timestamp, md5(coalesce(attributes, '{}')));
 
+-- Tabela de estado atual por partição (metric_name + service + label set).
+-- Uma linha por série — atualizada atomicamente a cada export.
+-- Substitui qualquer query de catálogo sobre a tabela histórica.
+CREATE TABLE IF NOT EXISTS metrics_current (
+    metric_name             TEXT        NOT NULL,
+    metric_type             TEXT        NOT NULL,
+    service_name            TEXT        NOT NULL,
+    attributes              TEXT,
+    unit                    TEXT,
+    aggregation_temporality SMALLINT,
+    -- snapshot atual
+    timestamp               TIMESTAMPTZ NOT NULL,
+    value_double            DOUBLE PRECISION,
+    value_int               BIGINT,
+    metric_count            BIGINT,
+    metric_sum              DOUBLE PRECISION,
+    -- snapshot anterior — usado para calcular delta de métricas cumulativas
+    prev_timestamp          TIMESTAMPTZ,
+    prev_value_double       DOUBLE PRECISION,
+    prev_value_int          BIGINT,
+    prev_metric_count       BIGINT,
+    prev_metric_sum         DOUBLE PRECISION
+);
+-- Chave natural: (metric_name, service_name, label_set).
+-- md5 evita índice em coluna TEXT longa.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_metrics_current_key
+    ON metrics_current(metric_name, service_name, md5(coalesce(attributes, '{}')));
+CREATE INDEX IF NOT EXISTS idx_metrics_current_svc
+    ON metrics_current(service_name);
+
 CREATE TABLE IF NOT EXISTS logs (
 	id                  BIGSERIAL PRIMARY KEY,
 	timestamp           TIMESTAMPTZ NOT NULL,
