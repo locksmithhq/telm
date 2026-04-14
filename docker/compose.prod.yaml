@@ -11,10 +11,15 @@ services:
       - GRPC_PORT=9317
       - POSTGRES_HOST=database
       - POSTGRES_USER=${POSTGRES_USER:-telm}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-telm123}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=${POSTGRES_DB:-telm}
       - POSTGRES_PORT=5432
       - SSL_MODE=disable
+      - JWT_SECRET=${JWT_SECRET}
+      - ADMIN_EMAIL=${ADMIN_EMAIL}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - HTTPS=${HTTPS:-false}
+      - CORS_ORIGIN=${CORS_ORIGIN:-}
     ports:
       - "${APP_PORT:-4000}:8080"   # Web UI + REST API
     depends_on:
