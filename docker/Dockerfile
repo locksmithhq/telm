@@ -7,11 +7,10 @@ COPY web/ ./
 RUN bun run build
 
 # ── Stage 2: build API binary ──────────────────────────────────────────────────
-FROM golang:1.24-alpine AS api-builder
+FROM golang:1.26.0-alpine AS api-builder
 WORKDIR /api
-COPY api/go.mod api/go.sum ./
-RUN go mod tidy
 COPY api/ ./
+RUN go mod tidy
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/telm ./cmd
 
 # ── Stage 3: fetch OTel collector contrib ─────────────────────────────────────
